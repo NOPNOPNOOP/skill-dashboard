@@ -1,0 +1,93 @@
+id: skill-dashboard
+name: "Skill Dashboard Studio"
+category: "Agent & Automation"
+description: >-
+  Local full-stack Web Studio, Reactive Polyglot Compute Graph, Explicit Modular Manifest Linker, and Meta-Skill Operations Console for
+  discovering, inspecting, tagging, mounting, validating, and executing AI Agent skills across Claude Code, Codex, OpenCode, Pi, OpenClaw, and npx skills.
+icon: ".dashboard/assets/icon.svg"
+defaultWorkspace: "~/.agents/skills/skill-dashboard"
+tsPrelude: true
+
+envVars:
+  - key: PORT
+    label: "Dashboard HTTP Port"
+    default: "8766"
+    description: "Port used by Skill Dashboard HTTP & WebSocket server"
+
+# 1. Explicit Modular Includes (Zero Hidden Folder Magic — Root Manifest is the Transparent Index)
+includes:
+  - ./modules/01-service-and-build.yaml
+  - ./modules/02-ecosystem-and-cli.yaml
+
+# 2. Reusable Parameter Definitions ($ref: "#/defs/<key>")
+defs:
+  targetSkillField:
+    key: skill_id
+    label: "Target Skill (from `skills-catalog-table`)"
+    type: select
+    positional: true
+    required: true
+    default: "skill-dashboard"
+    fromData: "skills-catalog-table"
+
+# 3. Global Reactive Context Switcher (Drives DAG Re-evaluation across Playground & Custom HTML Views)
+context:
+  - key: skill_scope
+    label: "Skill Audit Scope"
+    type: select
+    default: "studio"
+    options:
+      - label: "Studio-Configured (.dashboard)"
+        value: "studio"
+      - label: "Has Scripts/Tools"
+        value: "scripts"
+      - label: "All Installed Skills"
+        value: "all"
+
+tags:
+  - dashboard
+  - studio
+  - multi-agent
+  - typescript
+  - terminal
+  - ui-visual
+  - studio-ready
+defaultPrompt: "/skill-dashboard "
+
+views:
+  - id: service-panel
+    title: "🎛️ Service & Daemon Control Panel"
+    type: html
+    source: ".dashboard/views/service_panel.html"
+  - id: ecosystem-matrix
+    title: "⚡ Ecosystem Mount Matrix"
+    type: html
+    source: ".dashboard/views/ecosystem_matrix.html"
+  - id: overview
+    title: "Manifest Authoring Spec (SKILL.md)"
+    type: markdown
+    source: "SKILL.md"
+  - id: ref-01-manifest
+    title: "📘 01. Manifest, Actions & Artifacts"
+    type: markdown
+    source: "references/01-manifest-and-actions-spec.md"
+  - id: ref-02-reactive
+    title: "📗 02. Reactive Data Graph & Parsers"
+    type: markdown
+    source: "references/02-reactive-data-graph-and-parsers.md"
+  - id: ref-03-bridge
+    title: "📙 03. Custom HTML Views & Bridge 2.0"
+    type: markdown
+    source: "references/03-custom-html-views-and-bridge-sdk.md"
+  - id: ref-04-hitl-cli
+    title: "📕 04. Agent HITL Scratchpads & CLI"
+    type: markdown
+    source: "references/04-agent-hitl-scratchpads-and-modular-cli.md"
+  - id: context
+    title: "Domain Glossary (CONTEXT.md)"
+    type: markdown
+    source: "CONTEXT.md"
+  - id: prd
+    title: "Product Spec (PRD.md)"
+    type: markdown
+    source: ".scratch/skill-dashboard/PRD.md"

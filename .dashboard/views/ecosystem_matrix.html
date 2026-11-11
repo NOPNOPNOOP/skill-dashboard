@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>All-Skills Ecosystem Mount Matrix</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root, html[data-theme="light"] {
+      --bg: #f8f7f3;
+      --card: #ffffff;
+      --sub: #f2f0e9;
+      --border: #e2dfd5;
+      --text: #1e293b;
+      --muted: #64748b;
+    }
+    html[data-theme="dark"] {
+      --bg: #181c24;
+      --card: #212631;
+      --sub: #151921;
+      --border: #2c3342;
+      --text: #e5e9f0;
+      --muted: #8b95a7;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 18px;
+    }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .subcard { background: var(--sub); border: 1px solid var(--border); border-radius: 10px; }
+    .muted { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+    th { background: var(--sub); font-weight: 700; position: sticky; top: 0; z-index: 10; }
+    .pill { padding: 2px 7px; border-radius: 6px; font-size: 11px; font-family: monospace; background: var(--sub); border: 1px solid var(--border); }
+    .toggle-on { background: rgba(16, 185, 129, 0.16); color: #059669; border: 1px solid rgba(16, 185, 129, 0.4); font-weight: 700; padding: 3px 9px; border-radius: 6px; cursor: pointer; }
+    html[data-theme="dark"] .toggle-on { color: #34d399; }
+    .toggle-off { background: var(--sub); color: var(--muted); border: 1px solid var(--border); padding: 3px 9px; border-radius: 6px; cursor: pointer; opacity: 0.7; }
+    .toggle-auto { background: rgba(2, 132, 199, 0.14); color: #0284c7; border: 1px solid rgba(2, 132, 199, 0.3); font-weight: 600; padding: 3px 9px; border-radius: 6px; font-size: 11px; }
+    html[data-theme="dark"] .toggle-auto { color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <div class="flex flex-col gap-4">
+    <div class="card flex items-center justify-between gap-3 flex-wrap">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="px-2 py-0.5 rounded text-xs font-mono bg-sky-500/15 text-sky-600 font-bold">Meta-Skill Matrix</span>
+          <h2 class="text-base font-bold m-0">Global Multi-Agent Skill Ecosystem Matrix</h2>
+        </div>
+        <p class="text-xs muted mt-1 mb-0" id="summary-line">Loading all canonical skills...</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <input id="q-input" type="text" placeholder="Filter skills or #tags..." class="subcard px-3 py-1.5 text-xs outline-none" oninput="renderTable()" />
+        <button class="pill cursor-pointer font-semibold" onclick="loadMatrix(true)">↻ Rescan</button>
+      </div>
+    </div>
+
+    <div class="card p-0 overflow-hidden">
+      <div class="max-h-[540px] overflow-y-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Skill</th>
+              <th>Category & #Tags</th>
+              <th>~/.agents (Codex·OpenCode·Pi)</th>
+              <th>Claude Code (~/.claude)</th>
+              <th>OpenClaw</th>
+              <th>Source / Studio</th>
+            </tr>
+          </thead>
+          <tbody id="matrix-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let allSkills = [];
+
+    async function loadMatrix(refresh = false) {
+      const res = await fetch("/api/bootstrap" + (refresh ? "?refresh=1" : ""));
+      const data = await res.json();
+      allSkills = data.skills || [];
+      const claudeCount = allSkills.filter(s => s.mounts.some(m => m.agent === "claude")).length;
+      const studioCount = allSkills.filter(s => s.layers.companion).length;
+      document.getElementById("summary-line").textContent =
+        "Total Skills: " + allSkills.length +
+        " | Mounted in Claude Code: " + claudeCount + "/" + allSkills.length +
+        " | Studio Configured (.dashboard): " + studioCount;
+      renderTable();
+    }
+
+    async function toggleMount(skillId, agent, enabled) {
+      await fetch("/api/mounts/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skillId, agent, enabled })
+      });
+      await loadMatrix(true);
+    }
+
+    function renderTable() {
+      const q = (document.getElementById("q-input").value || "").toLowerCase().trim();
+      const tbody = document.getElementById("matrix-body");
+      tbody.innerHTML = "";
+
+      for (const s of allSkills) {
+        const tagsStr = (s.manifest.tags || []).map(t => "#" + t).join(" ");
+        if (q && !s.id.toLowerCase().includes(q) && !s.manifest.name.toLowerCase().includes(q) && !tagsStr.toLowerCase().includes(q)) {
+          continue;
+        }
+        const tr = document.createElement("tr");
+        const hasClaude = s.mounts.some(m => m.agent === "claude");
+        const hasOpenClaw = s.mounts.some(m => m.agent === "openclaw");
+
+        tr.innerHTML =
+          '<td><div class="font-bold">' + s.manifest.name + '</div><div class="font-mono text-[11px] muted">' + s.id + '</div></td>' +
+          '<td><div class="text-xs font-semibold mb-1">' + s.manifest.category + '</div><div class="flex gap-1 flex-wrap">' +
+            (s.manifest.tags || []).slice(0, 4).map(t => '<span class="pill">#' + t + '</span>').join("") +
+          '</div></td>' +
+          '<td>' + (s.inAgentsHub ? '<span class="toggle-auto">✓ Auto via .agents</span>' : '<button class="toggle-off" data-hub="' + s.id + '">+ Link .agents</button>') + '</td>' +
+          '<td><button class="' + (hasClaude ? 'toggle-on' : 'toggle-off') + '" data-claude="' + s.id + '">' + (hasClaude ? '● Mounted' : '○ Unmounted') + '</button></td>' +
+          '<td><button class="' + (hasOpenClaw ? 'toggle-on' : 'toggle-off') + '" data-openclaw="' + s.id + '">' + (hasOpenClaw ? '● Mounted' : '○ Unmounted') + '</button></td>' +
+          '<td><div class="text-xs font-mono">' + (s.provenance ? s.provenance.source : 'local') + '</div>' +
+            (s.layers.companion ? '<span class="toggle-on text-[10px] inline-block mt-1">Studio Ready</span>' : '') +
+          '</td>';
+
+        const hubBtn = tr.querySelector("[data-hub]");
+        if (hubBtn) hubBtn.onclick = () => toggleMount(s.id, "agents-hub", true);
+        tr.querySelector("[data-claude]").onclick = () => toggleMount(s.id, "claude", !hasClaude);
+        tr.querySelector("[data-openclaw]").onclick = () => toggleMount(s.id, "openclaw", !hasOpenClaw);
+
+        tbody.appendChild(tr);
+      }
+    }
+
+    window.SkillDashboard.on("runCompleted", () => loadMatrix(true));
+    loadMatrix(false);
+  </script>
+</body>
+</html>

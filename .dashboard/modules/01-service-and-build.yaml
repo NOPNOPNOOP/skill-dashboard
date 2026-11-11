@@ -1,0 +1,157 @@
+# Module 01: Service Daemon, Build, Validation & SQLite Telemetry
+data:
+  - id: service-telemetry
+    title: "Service Daemon & SQLite Telemetry"
+    description: "Live status of port 8766 server, macOS launchctl Keep-Alive agent, and SQLite run index (`runtime: ts` · `prelude: true` · `shape: kv` · `pollMs: 10000`)"
+    runtime: ts
+    prelude: true
+    shape: kv
+    sync:
+      onMount: true
+      pollMs: 10000
+    quickActions:
+      - label: "🟢 Enable Keep-Alive"
+        actionId: install-launchd
+        args: {}
+      - label: "🔄 Rebuild & Restart"
+        actionId: rebuild-and-restart
+        args: {}
+      - label: "▶ Run E2E Tests"
+        actionId: run-tests
+        args: {}
+    code: |
+      const home = os.homedir();
+      const port = ctx.env?.PORT || "8766";
+      const plistPath = path.join(home, "Library/LaunchAgents/com.local.skill-dashboard.plist");
+      const dbPath = path.join(home, ".local/share/skill-dashboard/dashboard.db");
+      const configPath = path.join(home, ".config/skill-dashboard/config.yaml");
+      const cachePath = path.join(home, ".cache/skill-dashboard");
+      const plistExists = fs.existsSync(plistPath);
+      const dbSizeKb = fs.existsSync(dbPath)
+        ? `${(fs.statSync(dbPath).size / 1024).toFixed(1)} KB`
+        : "0 KB";
+      let serverStatus = "OFFLINE";
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(400) });
+        if (res.ok) serverStatus = `ONLINE (127.0.0.1:${port})`;
+      } catch {}
+      return {
+        "HTTP & WS Server": serverStatus,
+        "macOS LaunchAgent": plistExists ? "INSTALLED (Auto Keep-Alive)" : "MANUAL MODE",
+        "SQLite Index (dashboard.db)": dbSizeKb,
+        "XDG Config (config.yaml)": fs.existsSync(configPath) ? "READY" : "DEFAULT",
+        "XDG Cache Dir": cachePath,
+        "Active Scope Filter": String(ctx.context.skill_scope || "studio"),
+      };
+
+  - id: recent-runs-table
+    title: "Recent Execution Runs (SQLite `dashboard.db`)"
+    description: "Zero-overhead native `bun:sqlite` query against `~/.local/share/skill-dashboard/dashboard.db` (`runtime: sqlite` · `shape: table`)"
+    runtime: sqlite
+    db: "~/.local/share/skill-dashboard/dashboard.db"
+    sql: "SELECT skill_id AS skill, action_title AS action, status, exit_code AS exitCode, duration_ms AS durationMs FROM runs ORDER BY started_at DESC LIMIT 8"
+    shape: table
+    primaryKey: "action"
+    columns:
+      - key: "skill"
+        label: "Skill"
+        type: "code"
+      - key: "action"
+        label: "Action Title"
+        type: "text"
+      - key: "status"
+        label: "Status"
+        type: "badge"
+      - key: "exitCode"
+        label: "Exit"
+        type: "number"
+      - key: "durationMs"
+        label: "Duration (ms)"
+        type: "number"
+
+  - id: ecosystem-health
+    title: "3-Tier Manifest & Ecosystem Audit Output"
+    description: "Live L1/L2/L3 validation output across all .dashboard/manifest.yaml files"
+    runtime: zsh
+    command: "bun run src/validate-manifests.ts"
+    cwd: skill_dir
+    shape: raw
+
+actionGroups:
+  - name: "1. Studio Build, Validation & Daemon Service"
+    description: "Build frontend bundle, validate all skill manifests, run E2E tests, and manage macOS Keep-Alive LaunchAgent."
+    actions:
+      - id: validate-manifests
+        title: "Validate All Skill Manifests (L1/L2/L3 Audit)"
+        subgroup: "1.1 Build & Verification"
+        description: "Run 3-tier validation (Zod schema, cross-file reference graph, TS/Python syntax & prelude check)."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun run src/validate-manifests.ts"
+
+      - id: build-ui
+        title: "Rebuild Frontend Studio Bundle"
+        subgroup: "1.1 Build & Verification"
+        description: "Compile React + xterm.js frontend into dist/ via Bun.build."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun run build:ui"
+
+      - id: run-tests
+        title: "Run End-to-End Server Seam Tests"
+        subgroup: "1.1 Build & Verification"
+        description: "Execute automated bun test suite across discovery, 4-layer cascade, Reactive 2.0 graph, PTY, and SQLite re-attach."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun test"
+
+      - id: install-launchd
+        title: "Install / Enable macOS Keep-Alive Service (launchctl)"
+        subgroup: "1.2 Background Daemon (launchd)"
+        description: "Register com.local.skill-dashboard.plist in ~/Library/LaunchAgents so port 8766 stays online automatically."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun run src/service-manager.ts install"
+
+      - id: rebuild-and-restart
+        title: "Rebuild Frontend Bundle & Restart Daemon"
+        subgroup: "1.2 Background Daemon (launchd)"
+        description: "Multi-line isolated script (`script: |`) that validates manifests, rebuilds dist/, and restarts the launchctl Keep-Alive service."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        script: |
+          echo "1. Validating all companion manifests..."
+          bun run src/validate-manifests.ts
+          echo "2. Rebuilding frontend bundle..."
+          bun run build:ui
+          echo "3. Restarting launchctl Keep-Alive service..."
+          bun run src/service-manager.ts restart
+
+      - id: prune-logs
+        title: "Prune Old SQLite Run Records & Log Files"
+        subgroup: "1.2 Background Daemon (launchd)"
+        description: "Retain the most recent N execution runs in dashboard.db and delete older .log files."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun -e 'import { DashboardDatabase } from \"./src/db.ts\"; import { resolveDashboardPaths } from \"./src/paths.ts\"; const db = new DashboardDatabase(resolveDashboardPaths().dataDir); const deleted = db.pruneOldRuns({{form.keep}}); console.log(\"Pruned\", deleted, \"old runs.\"); db.close();'"
+        form:
+          - key: keep
+            label: "Recent Runs to Keep"
+            type: number
+            positional: true
+            default: 50
+
+      - id: uninstall-launchd
+        title: "Uninstall macOS Keep-Alive Service"
+        subgroup: "1.2 Background Daemon (launchd)"
+        description: "Remove com.local.skill-dashboard.plist from ~/Library/LaunchAgents."
+        danger: warn
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun run src/service-manager.ts uninstall"

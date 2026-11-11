@@ -1,0 +1,31 @@
+{
+  "name": "skill-dashboard",
+  "version": "1.0.0",
+  "description": "Multi-Agent Skill Dashboard & Interactive Operations Studio",
+  "type": "module",
+  "bin": {
+    "skill-dashboard": "./src/cli.ts",
+    "manifest-cli": "./src/manifest-cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "dev": "bun --watch run src/cli.ts",
+    "build:ui": "bun run src/build-ui.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "lucide-react": "^0.460.0",
+    "marked": "^15.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "yaml": "^2.6.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1"
+  }
+}

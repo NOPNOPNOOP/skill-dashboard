@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Service & Daemon Control Panel</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root, html[data-theme="light"] {
+      --bg: #f8f7f3;
+      --card: #ffffff;
+      --sub: #f2f0e9;
+      --border: #e2dfd5;
+      --text: #1e293b;
+      --muted: #64748b;
+    }
+    html[data-theme="dark"] {
+      --bg: #181c24;
+      --card: #212631;
+      --sub: #151921;
+      --border: #2c3342;
+      --text: #e5e9f0;
+      --muted: #8b95a7;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 18px;
+    }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .subcard { background: var(--sub); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+    .muted { color: var(--muted); }
+    .btn {
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--sub);
+      color: var(--text);
+      transition: all 0.15s;
+    }
+    .btn:hover { border-color: #0284c7; }
+    .btn-primary { background: #0284c7; color: #fff; border-color: #0284c7; }
+    .btn-primary:hover { background: #0369a1; }
+    .btn-emerald { background: #059669; color: #fff; border-color: #059669; }
+    .btn-emerald:hover { background: #047857; }
+    .btn-warn { background: #d97706; color: #fff; border-color: #d97706; }
+  </style>
+</head>
+<body>
+  <div class="flex flex-col gap-4">
+    <!-- Top Service Control Bar -->
+    <div class="card flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="px-2 py-0.5 rounded text-xs font-mono bg-emerald-500/15 text-emerald-600 font-bold">Daemon Control Center</span>
+          <h2 class="text-base font-bold m-0">Skill Dashboard Service & Reactive Graph Studio</h2>
+        </div>
+        <p class="text-xs muted mt-1 mb-0">Manage macOS launchctl Keep-Alive service on port 8766, inspect SQLite run telemetry, and audit skill manifests.</p>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button class="btn btn-emerald" data-sd-action="install-launchd">🟢 Enable / Verify Keep-Alive</button>
+        <button class="btn btn-primary" data-sd-action="rebuild-and-restart">🔄 Rebuild UI & Restart Service</button>
+        <button class="btn" data-sd-action="validate-manifests">✓ Validate All Manifests</button>
+        <button class="btn" data-sd-action="prune-logs">🧹 Prune Old Logs</button>
+        <button class="btn btn-warn" data-sd-action="uninstall-launchd" data-sd-mode="prefill">🛑 Uninstall Daemon</button>
+      </div>
+    </div>
+
+    <!-- Declarative Reactive Context Switcher Bar (Bridge 2.0) -->
+    <div class="card flex items-center justify-between flex-wrap gap-3">
+      <div class="text-xs font-bold">Global Reactive Context Filter (`data-sd-context-bar`):</div>
+      <div data-sd-context-bar></div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <!-- Left 2 cols: Live Service Telemetry KV Grid -->
+      <div class="card lg:col-span-2 flex flex-col gap-2.5">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-bold m-0">1. Live Daemon & Storage Telemetry (`runtime: ts` · `shape: kv`)</h3>
+          <span class="text-[11px] font-mono muted">Auto-polls every 10s</span>
+        </div>
+        <div data-sd-widget="service-telemetry" class="subcard">Loading daemon telemetry...</div>
+      </div>
+
+      <!-- Right 1 col: Derived Studio Coverage Scalar KPI -->
+      <div class="card flex flex-col justify-between gap-2.5">
+        <div>
+          <h3 class="text-sm font-bold m-0">2. Filtered Skill Count (`dependsOn` Scalar)</h3>
+          <p class="text-xs muted mt-1 mb-0">Derived in-memory from `skills-catalog-table` without extra disk scans.</p>
+        </div>
+        <div data-sd-widget="studio-coverage-kpi" class="subcard py-4 px-4">Calculating...</div>
+      </div>
+    </div>
+
+    <!-- Middle: Interactive Skills Audit Table (with Row Actions) -->
+    <div class="card flex flex-col gap-2.5">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold m-0">3. Local Skills Studio Audit Table (`runtime: ts` · `shape: table` · `rowActions`)</h3>
+        <span class="text-xs muted">Filter controlled by Reactive Context above</span>
+      </div>
+      <div data-sd-widget="skills-catalog-table" class="subcard max-h-72 overflow-y-auto">Loading skills table...</div>
+    </div>
+
+    <!-- Bottom: Native bun:sqlite Execution History Table -->
+    <div class="card flex flex-col gap-2.5">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-bold m-0">4. Recent Execution Runs (`runtime: sqlite` · `dashboard.db`)</h3>
+        <button class="btn" data-sd-action="run-tests">▶ Run E2E Test Suite</button>
+      </div>
+      <div data-sd-widget="recent-runs-table" class="subcard max-h-64 overflow-y-auto">Querying SQLite runs table...</div>
+    </div>
+  </div>
+</body>
+</html>

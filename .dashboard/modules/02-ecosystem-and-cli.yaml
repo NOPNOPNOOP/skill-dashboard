@@ -1,0 +1,160 @@
+# Module 02: Ecosystem Catalog, Symbol Graph CLI (`manifest-cli`) & Community Skills
+data:
+  - id: skills-catalog-table
+    title: "Local Skills Studio Audit ({{context.skill_scope}})"
+    description: "Reactive table of local skills filtered by `context.skill_scope` (`runtime: ts` · `prelude: true` · `shape: table` · `rowActions` · `fromData` source)"
+    runtime: ts
+    prelude: true
+    shape: table
+    primaryKey: "id"
+    valueColumn: "id"
+    labelColumn: "id"
+    metaColumn: "status"
+    sync:
+      onMount: true
+      dependsOn:
+        - "context.skill_scope"
+    columns:
+      - key: "id"
+        label: "Skill ID"
+        type: "code"
+      - key: "status"
+        label: "Studio Status"
+        type: "badge"
+      - key: "hasScripts"
+        label: "Scripts/Tools"
+        type: "boolean"
+      - key: "location"
+        label: "Hub"
+        type: "text"
+    rowActions:
+      - label: "Symbol Map"
+        actionId: manifest-cli-map
+        mode: run
+        args:
+          skill_id: "{{row.id}}"
+      - label: "Sync Manifest →"
+        actionId: sync-target-skill
+        mode: prefill
+        args:
+          skill_id: "{{row.id}}"
+    code: |
+      const hubDir = path.join(os.homedir(), ".agents/skills");
+      const scope = String(ctx.context.skill_scope || "studio");
+      const rows: any[] = [];
+      if (fs.existsSync(hubDir)) {
+        for (const entry of fs.readdirSync(hubDir).sort()) {
+          if (entry.startsWith(".")) continue;
+          const full = path.join(hubDir, entry);
+          try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
+          const hasManifest = fs.existsSync(path.join(full, ".dashboard/manifest.yaml"));
+          const hasScripts = fs.existsSync(path.join(full, "scripts")) || fs.existsSync(path.join(full, "tools"));
+          if (scope === "studio" && !hasManifest) continue;
+          if (scope === "scripts" && !hasScripts) continue;
+          rows.push({
+            id: entry,
+            status: hasManifest ? "studio-ready" : hasScripts ? "scripted" : "zero-config",
+            hasScripts,
+            location: "~/.agents/skills",
+          });
+        }
+      }
+      return rows;
+
+  - id: studio-coverage-kpi
+    title: "Filtered Skills in Scope ({{context.skill_scope}})"
+    description: "Derived scalar node computed in-memory from `skills-catalog-table` (`dependsOn` · `prelude: true` · 0 extra I/O)"
+    runtime: ts
+    prelude: true
+    shape: scalar
+    sync:
+      onMount: true
+      dependsOn:
+        - "skills-catalog-table"
+    code: |
+      const rows: any[] = ctx.data["skills-catalog-table"] || [];
+      const studioReady = rows.filter((r) => r.status === "studio-ready").length;
+      return {
+        value: `${rows.length} Skills (${studioReady} Studio)`,
+        unit: `in '${ctx.context.skill_scope}' scope`,
+        tone: studioReady > 0 ? "success" : "info",
+      };
+
+actionGroups:
+  - name: "2. Manifest Symbol CLI & Community Skills (npx skills)"
+    description: "Inspect cross-file symbol maps (`manifest-cli`), sync manifests, or search/install/update community skills."
+    actions:
+      - id: manifest-cli-map
+        title: "Print Cross-File Symbol Map & Reference Graph (`manifest-cli map`)"
+        subgroup: "2.1 Manifest Authoring CLI"
+        description: "Output the full symbol index, defining module files, and bidirectional dependency/consumer graph for a skill."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "bun run src/manifest-cli.ts map {{form.skill_id}}"
+        form:
+          - $ref: "#/defs/targetSkillField"
+
+      - id: sync-target-skill
+        title: "Inspect / Print Agent Sync Prompt for Skill"
+        subgroup: "2.1 Manifest Authoring CLI"
+        description: "Demonstrates `fromData: skills-catalog-table` dropdown binding via `$ref: '#/defs/targetSkillField'`."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        script: |
+          TARGET="{{form.skill_id}}"
+          echo "=== Skill: $TARGET (Scope: {{context.skill_scope}}) ==="
+          bun run src/manifest-cli.ts map "$TARGET"
+        form:
+          - $ref: "#/defs/targetSkillField"
+
+      - id: npx-skills-find
+        title: "Search Community Skills Registry"
+        subgroup: "2.2 Discover & Install"
+        description: "Search available skills on GitHub via npx skills find."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "npx -y skills find {{form.query}}"
+        form:
+          - key: query
+            label: "Search Keyword"
+            type: text
+            positional: true
+            required: true
+            default: "typescript"
+
+      - id: npx-skills-add
+        title: "Install Skill Package from GitHub"
+        subgroup: "2.2 Discover & Install"
+        description: "Install a skill repository globally into ~/.agents/skills and link to agents."
+        danger: warn
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "npx -y skills add {{form.package}} -g -y"
+        form:
+          - key: package
+            label: "GitHub Repo or Package (owner/repo)"
+            type: text
+            positional: true
+            required: true
+            placeholder: "mattpocock/skills"
+
+      - id: npx-skills-list
+        title: "List All Installed Global Skills (CLI)"
+        subgroup: "2.3 Inspect & Update"
+        description: "Print full npx skills list -g table with agent bindings and sources."
+        danger: safe
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "npx -y skills list -g"
+
+      - id: npx-skills-update-all
+        title: "Update All Global Community Skills"
+        subgroup: "2.3 Inspect & Update"
+        description: "Pull latest versions for all skills tracked in ~/.agents/.skill-lock.json."
+        danger: warn
+        defaultRunner: web_terminal
+        cwd: skill_dir
+        command: "npx -y skills update -g -y"
