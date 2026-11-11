@@ -73,8 +73,8 @@ data:
     title: "3-Tier Manifest & Ecosystem Audit Output"
     description: "Live L1/L2/L3 validation output across all .dashboard/manifest.yaml files"
     runtime: zsh
-    command: "bun run src/validate-manifests.ts"
-    cwd: skill_dir
+    command: "bunx --bun manifest-cli validate"
+    cwd: project_root
     shape: raw
 
 actionGroups:
@@ -87,8 +87,8 @@ actionGroups:
         description: "Run 3-tier validation (Zod schema, cross-file reference graph, TS/Python syntax & prelude check)."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
-        command: "bun run src/validate-manifests.ts"
+        cwd: project_root
+        command: "bunx --bun manifest-cli validate"
 
       - id: build-ui
         title: "Rebuild Frontend Studio Bundle"

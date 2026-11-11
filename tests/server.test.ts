@@ -1805,7 +1805,11 @@ actionGroups:
       "utf-8"
     );
 
-    symlinkSync(resolve(import.meta.dir, ".."), join(agentsHub, "skill-dashboard"), "dir");
+    symlinkSync(
+      resolve(import.meta.dir, "../skills/skill-dashboard"),
+      join(agentsHub, "skill-dashboard"),
+      "dir"
+    );
 
     const srv = createDashboardServer({
       port: 0,
@@ -1895,16 +1899,18 @@ actionGroups:
       expect(selfSkillMd).not.toContain("/Users/xandrezhu/");
 
       const selfManifestText = readFileSync(
-        resolve(import.meta.dir, "../.dashboard/manifest.yaml"),
+        resolve(import.meta.dir, "../skills/skill-dashboard/.dashboard/manifest.yaml"),
         "utf-8"
       );
       for (const refFile of [
-        "skills/skill-dashboard/references/01-manifest-and-actions-spec.md",
-        "skills/skill-dashboard/references/02-reactive-data-graph-and-parsers.md",
-        "skills/skill-dashboard/references/03-custom-html-views-and-bridge-sdk.md",
-        "skills/skill-dashboard/references/04-agent-hitl-scratchpads-and-modular-cli.md",
+        "references/01-manifest-and-actions-spec.md",
+        "references/02-reactive-data-graph-and-parsers.md",
+        "references/03-custom-html-views-and-bridge-sdk.md",
+        "references/04-agent-hitl-scratchpads-and-modular-cli.md",
       ]) {
-        expect(existsSync(resolve(import.meta.dir, "..", refFile))).toBe(true);
+        expect(
+          existsSync(resolve(import.meta.dir, "../skills/skill-dashboard", refFile))
+        ).toBe(true);
         expect(selfManifestText).toContain(refFile);
       }
       const selfSkill = boot.skills.find((s: any) => s.id === "skill-dashboard");

@@ -90,8 +90,8 @@ actionGroups:
         description: "Output the full symbol index, defining module files, and bidirectional dependency/consumer graph for a skill."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
-        command: "bun run src/manifest-cli.ts map {{form.skill_id}}"
+        cwd: project_root
+        command: "bunx --bun manifest-cli map {{form.skill_id}}"
         form:
           - $ref: "#/defs/targetSkillField"
 
@@ -101,11 +101,11 @@ actionGroups:
         description: "Demonstrates `fromData: skills-catalog-table` dropdown binding via `$ref: '#/defs/targetSkillField'`."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         script: |
           TARGET="{{form.skill_id}}"
           echo "=== Skill: $TARGET (Scope: {{context.skill_scope}}) ==="
-          bun run src/manifest-cli.ts map "$TARGET"
+          bunx --bun manifest-cli map "$TARGET"
         form:
           - $ref: "#/defs/targetSkillField"
 
