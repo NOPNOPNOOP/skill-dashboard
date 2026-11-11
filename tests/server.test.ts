@@ -1884,7 +1884,10 @@ actionGroups:
       expect(fixModRes.prompt).toContain("modules/ops.yaml");
 
       // 5. Verify skill-dashboard's own progressive references/01..04-*.md exist, are registered in .dashboard/manifest.yaml, and pass 3-tier validation
-      const selfSkillMd = readFileSync(resolve(import.meta.dir, "../SKILL.md"), "utf-8");
+      const selfSkillMd = readFileSync(
+        resolve(import.meta.dir, "../skills/skill-dashboard/SKILL.md"),
+        "utf-8"
+      );
       expect(selfSkillMd).toContain("references/01-manifest-and-actions-spec.md");
       expect(selfSkillMd).toContain("references/02-reactive-data-graph-and-parsers.md");
       expect(selfSkillMd).toContain("references/03-custom-html-views-and-bridge-sdk.md");
@@ -1896,10 +1899,10 @@ actionGroups:
         "utf-8"
       );
       for (const refFile of [
-        "references/01-manifest-and-actions-spec.md",
-        "references/02-reactive-data-graph-and-parsers.md",
-        "references/03-custom-html-views-and-bridge-sdk.md",
-        "references/04-agent-hitl-scratchpads-and-modular-cli.md",
+        "skills/skill-dashboard/references/01-manifest-and-actions-spec.md",
+        "skills/skill-dashboard/references/02-reactive-data-graph-and-parsers.md",
+        "skills/skill-dashboard/references/03-custom-html-views-and-bridge-sdk.md",
+        "skills/skill-dashboard/references/04-agent-hitl-scratchpads-and-modular-cli.md",
       ]) {
         expect(existsSync(resolve(import.meta.dir, "..", refFile))).toBe(true);
         expect(selfManifestText).toContain(refFile);

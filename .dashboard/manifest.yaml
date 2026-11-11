@@ -66,23 +66,23 @@ views:
   - id: overview
     title: "Manifest Authoring Spec (SKILL.md)"
     type: markdown
-    source: "SKILL.md"
+    source: "skills/skill-dashboard/SKILL.md"
   - id: ref-01-manifest
     title: "📘 01. Manifest, Actions & Artifacts"
     type: markdown
-    source: "references/01-manifest-and-actions-spec.md"
+    source: "skills/skill-dashboard/references/01-manifest-and-actions-spec.md"
   - id: ref-02-reactive
     title: "📗 02. Reactive Data Graph & Parsers"
     type: markdown
-    source: "references/02-reactive-data-graph-and-parsers.md"
+    source: "skills/skill-dashboard/references/02-reactive-data-graph-and-parsers.md"
   - id: ref-03-bridge
     title: "📙 03. Custom HTML Views & Bridge 2.0"
     type: markdown
-    source: "references/03-custom-html-views-and-bridge-sdk.md"
+    source: "skills/skill-dashboard/references/03-custom-html-views-and-bridge-sdk.md"
   - id: ref-04-hitl-cli
     title: "📕 04. Agent HITL Scratchpads & CLI"
     type: markdown
-    source: "references/04-agent-hitl-scratchpads-and-modular-cli.md"
+    source: "skills/skill-dashboard/references/04-agent-hitl-scratchpads-and-modular-cli.md"
   - id: context
     title: "Domain Glossary (CONTEXT.md)"
     type: markdown

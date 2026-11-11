@@ -15,41 +15,42 @@ A local full-stack Web Studio, Reactive Polyglot Compute Graph, Universal Local 
 
 ## 1. Installation (`npx skills`) & Quick CLI Invocations
 
-Install or update globally via `npx skills`:
+Install globally via `npx skills`:
 ```bash
-npx skills add <owner>/skill-dashboard -g
+npx skills add NOPNOPNOOP/skill-dashboard --skill skill-dashboard -g
 ```
 
 Launch the Skill Dashboard server and open the browser UI (defaults to `http://127.0.0.1:8766` and reuses an existing running instance):
 
 ```bash
 # 1. Start dashboard (or open browser if already running)
-bun ~/.agents/skills/skill-dashboard/src/cli.ts [--port 8766] [--workspace <path>] [--no-open]
+# Uses bunx zero-install, or globally installed `skill-dashboard`
+bunx --bun skill-dashboard [--port 8766] [--workspace <path>] [--no-open]
 
 # 2. Inspect & Scaffold Unconfigured Folders or Zero-Config Skills
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts inspect <dir_path> [--json]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts init <dir_path> [--modular]
+bunx --bun manifest-cli inspect <dir_path> [--json]
+bunx --bun manifest-cli init <dir_path> [--modular]
 
 # 3. Manifest Symbol Graph, Cross-File Reference Tracker & 3-Tier Validator CLI
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts map <unit_id> [--json]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts refs <unit_id> <symbol_id>
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts validate [<unit_id>]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts eval-data <unit_id> [node_id] [--context=k=v]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts split <unit_id> [--write]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts bundle <unit_id>
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts schema [data|includes|action]
+bunx --bun manifest-cli map <unit_id> [--json]
+bunx --bun manifest-cli refs <unit_id> <symbol_id>
+bunx --bun manifest-cli validate [<unit_id>]
+bunx --bun manifest-cli eval-data <unit_id> [node_id] [--context=k=v]
+bunx --bun manifest-cli split <unit_id> [--write]
+bunx --bun manifest-cli bundle <unit_id>
+bunx --bun manifest-cli schema [data|includes|action]
 
 # 4. Ephemeral Agent HITL Scratchpads & Synchronous Wait
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts scratchpad create --id <slug> --title "<Title>" [--project <cwd>]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts wait <unit_id> [--since <seq_or_ts>] [--timeout 120]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts scratchpad promote <unit_id> --to project|skill
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts scratchpad list
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts scratchpad delete <unit_id>
+bunx --bun manifest-cli scratchpad create --id <slug> --title "<Title>" [--project <cwd>]
+bunx --bun manifest-cli wait <unit_id> [--since <seq_or_ts>] [--timeout 120]
+bunx --bun manifest-cli scratchpad promote <unit_id> --to project|skill
+bunx --bun manifest-cli scratchpad list
+bunx --bun manifest-cli scratchpad delete <unit_id>
 
 # 5. Manage Controlled Workspace Folders (~/.config/skill-dashboard/config.yaml)
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts folder add <dir_path> [--label "<Name>"]
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts folder list
-bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts folder remove <dir_path>
+bunx --bun manifest-cli folder add <dir_path> [--label "<Name>"]
+bunx --bun manifest-cli folder list
+bunx --bun manifest-cli folder remove <dir_path>
 ```
 
 ---
@@ -60,7 +61,7 @@ bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts folder remove <dir_path
    - **If a configuration file already exists**: Edit the **existing** defining file in place (if the target symbol comes from a module file such as `.dashboard/modules/01-ops.yaml`, edit that module file directly; otherwise edit the existing override or `<unit_dir>/.dashboard/manifest.yaml`). **NEVER overwrite or flatten an existing manifest from scratch**—use targeted `Edit` operations.
    - **If no configuration file exists yet (Layer 0 Zero-Config)**: Create **`<unit_dir>/.dashboard/manifest.yaml`** (and optional `.dashboard/views/*.html` or `.dashboard/modules/*.yaml`).
 2. **Mandatory 3-Tier Validation**:
-   - Always run `bun ~/.agents/skills/skill-dashboard/src/manifest-cli.ts validate <unit_id>` after creating or editing any manifest or module file until L1 (Zod schema), L2 (cross-file references & cycles), and L3 (TS/Python syntax, `prelude: true`, and `fromStdout` regexes) pass with `0` errors.
+   - Always run `bunx --bun manifest-cli validate <unit_id>` after creating or editing any manifest or module file until L1 (Zod schema), L2 (cross-file references & cycles), and L3 (TS/Python syntax, `prelude: true`, and `fromStdout` regexes) pass with `0` errors.
 3. **Never Pollute `{{skill_dir}}` or `/tmp` with Runtime Outputs**:
    - Always write persistent state/backups to **`{{data_dir}}`** (`$SD_DATA_DIR` $\rightarrow$ `~/.local/share/skill-dashboard/units/<id>`), caches to **`{{cache_dir}}`** (`$SD_CACHE_DIR`), and per-run reports/exports to **`{{artifacts_dir}}`** (`$SD_ARTIFACTS_DIR` $\rightarrow$ `~/.local/share/skill-dashboard/artifacts/<id>/<run_id>`).
 4. **Clean Multi-Line Scripts (`script: |`)**:
