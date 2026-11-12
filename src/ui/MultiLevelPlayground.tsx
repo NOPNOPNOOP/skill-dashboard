@@ -34,8 +34,10 @@ interface MultiLevelPlaygroundProps {
   onPrefillJump: (actionId: string, formValues: Record<string, unknown>) => void;
   onContextChanged?: () => void;
   onExecute: (params: {
-    actionId: string;
-    formValues: Record<string, unknown>;
+    actionId?: string;
+    adHocCommand?: string;
+    adHocTitle?: string;
+    formValues?: Record<string, unknown>;
     runner: "web_terminal" | "external_terminal";
     terminalApp?: "Terminal" | "iTerm";
     humanApproved?: boolean;
@@ -67,6 +69,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   const [selectedSubgroup, setSelectedSubgroup] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [focusedActionId, setFocusedActionId] = useState<string | null>(null);
+  const [highlightedActionId, setHighlightedActionId] = useState<string | null>(null);
   const [layoutMode, setLayoutMode] = useState<"hierarchy" | "cards">(
     isComplexSkill ? "hierarchy" : "cards"
   );
@@ -80,12 +83,28 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
     setLayoutMode(totalActionCount > 4 || actionGroups.length > 1 ? "hierarchy" : "cards");
   }, [skillId, totalActionCount, actionGroups.length]);
 
-  // Handle Prefill Jump from HTML App View or Docs
+  // Handle Prefill Jump from HTML App View, Docs, or "Locate in Playground"
   useEffect(() => {
     if (!prefillRequest) return;
     setSelectedGroup(null);
     setSelectedSubgroup(null);
     setFocusedActionId(prefillRequest.actionId);
+    setHighlightedActionId(prefillRequest.actionId);
+    const scrollTimer = setTimeout(() => {
+      if (typeof document !== "undefined") {
+        const el = document.querySelector(
+          `[data-sd-pick-kind="action"][data-sd-pick-id="${prefillRequest.actionId}"]`
+        );
+        if (el && "scrollIntoView" in el) {
+          (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+    }, 90);
+    const clearTimer = setTimeout(() => setHighlightedActionId(null), 2600);
+    return () => {
+      clearTimeout(scrollTimer);
+      clearTimeout(clearTimer);
+    };
   }, [prefillRequest?.seq]);
 
   const visibleGroups = useMemo(() => {
@@ -156,11 +175,16 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
         skillId={skillId}
         contextFields={contextFields || []}
         dataNodes={dataNodes || []}
+        actionGroups={actionGroups}
         activeWorkspace={activeWorkspace}
         refreshTrigger={refreshTrigger}
         commandEnvOverrides={commandEnvOverrides}
         onSkillUpdated={onSkillUpdated}
         onContextChanged={() => onContextChanged?.()}
+        onLocateActionInPlayground={(actionId, formValues) => {
+          onPrefillJump(actionId, formValues);
+        }}
+        onExecute={onExecute}
         onExecuteBoundTrigger={async ({ actionId, mode, formValues }) => {
           const targetAction = allActionsMap.get(actionId);
           // If mode is prefill or the target action has warn/danger approval gate, jump to the action form with prefill!
@@ -408,9 +432,11 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                                 data-sd-pick-id={action.id}
                                 data-sd-pick-title={action.title}
                                 className={`rounded-xl border transition-all ${
-                                  isFocused
-                                    ? "border-sky-500/60 shadow-md st-surface"
-                                    : "st-border st-subcard hover:border-sky-500/40"
+                                  highlightedActionId === action.id
+                                    ? "border-sky-500 ring-2 ring-sky-500/50 shadow-lg st-surface"
+                                    : isFocused
+                                      ? "border-sky-500/60 shadow-md st-surface"
+                                      : "st-border st-subcard hover:border-sky-500/40"
                                 }`}
                               >
                                 <div

@@ -504,6 +504,7 @@ export interface DataSnapshot {
   rawParsed?: unknown;
   consumedBy?: string[];
   resolvedEnv?: ResolvedCommandEnvSummary;
+  resolvedSource?: string;
   shape: DataShape;
   runtime: DataRuntime;
   status: "idle" | "loading" | "streaming" | "ready" | "error";

@@ -1,17 +1,27 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowDownCircle,
+  Check,
   ChevronDown,
   ChevronRight,
+  Code2,
+  Copy,
   Database,
+  Eye,
   Play,
   RefreshCw,
   Search,
+  ShieldAlert,
   Sliders,
+  Terminal,
+  X,
 } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { interpolateBoundTriggerArgs } from "../interpolator.ts";
 import type {
+  ActionGroup,
+  ActionItem,
   BoundActionTrigger,
   CanonicalSkill,
   CommandEnvConfig,
@@ -20,18 +30,30 @@ import type {
   DataSnapshot,
   TableColumn,
 } from "../types.ts";
+import { ActionCard } from "./ActionCard.tsx";
 import { CommandEnvEditor } from "./CommandEnvEditor.tsx";
-import { ansiToHtml } from "./highlight.ts";
+import { ansiToHtml, highlightCodeToHtml } from "./highlight.ts";
 
 interface StatusProbesBarProps {
   skillId: string;
   contextFields: ContextField[];
   dataNodes: DataNode[];
+  actionGroups?: ActionGroup[];
   activeWorkspace: string;
   refreshTrigger: number;
   commandEnvOverrides?: Record<string, CommandEnvConfig>;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onContextChanged?: (nextContext: Record<string, string | boolean>) => void;
+  onLocateActionInPlayground?: (actionId: string, formValues: Record<string, unknown>) => void;
+  onExecute?: (params: {
+    actionId?: string;
+    adHocCommand?: string;
+    adHocTitle?: string;
+    formValues?: Record<string, unknown>;
+    runner: "web_terminal" | "external_terminal";
+    terminalApp?: "Terminal" | "iTerm";
+    humanApproved?: boolean;
+  }) => Promise<void>;
   onExecuteBoundTrigger: (params: {
     actionId: string;
     mode: "run" | "prefill";
@@ -39,15 +61,27 @@ interface StatusProbesBarProps {
   }) => Promise<void>;
 }
 
+interface ActiveBoundActionAudit {
+  node: DataNode;
+  triggerKind: "Row Action" | "Bulk Action" | "Quick Action" | "Cell Action";
+  trigger: BoundActionTrigger;
+  resolvedArgs: Record<string, unknown>;
+  scopeSummary?: string;
+  seq: number;
+}
+
 export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   skillId,
   contextFields,
   dataNodes,
+  actionGroups = [],
   activeWorkspace,
   refreshTrigger,
   commandEnvOverrides,
   onSkillUpdated,
   onContextChanged,
+  onLocateActionInPlayground,
+  onExecute,
   onExecuteBoundTrigger,
 }) => {
   const [contextState, setContextState] = useState<Record<string, string | boolean>>({});
@@ -59,6 +93,38 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [showIntermediates, setShowIntermediates] = useState<boolean>(false);
   const [openEnvNodeId, setOpenEnvNodeId] = useState<string | null>(null);
+  const [inspectNodeId, setInspectNodeId] = useState<string | null>(null);
+  const [inspectTabMap, setInspectTabMap] = useState<
+    Record<string, "source" | "actions" | "raw">
+  >({});
+  const [copiedSourceNodeId, setCopiedSourceNodeId] = useState<string | null>(null);
+  const [activeAudit, setActiveAudit] = useState<ActiveBoundActionAudit | null>(null);
+
+  const actionsMap = useMemo(() => {
+    const map = new Map<string, { action: ActionItem; groupName: string }>();
+    for (const g of actionGroups || []) {
+      for (const a of g.actions || []) {
+        map.set(a.id, { action: a, groupName: g.name });
+      }
+      for (const sg of g.subgroups || []) {
+        for (const a of sg.actions || []) {
+          map.set(a.id, { action: a, groupName: `${g.name} / ${sg.name}` });
+        }
+      }
+    }
+    return map;
+  }, [actionGroups]);
+
+  useEffect(() => {
+    if (!activeAudit) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setActiveAudit(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeAudit]);
 
   const intermediateNodes = (dataNodes || []).filter((n) => Boolean(n.intermediate || n.hidden));
   const primaryNodes = (dataNodes || []).filter((n) => !n.intermediate && !n.hidden);
@@ -224,6 +290,9 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     setSelectedCategory("all");
     setSnapshots({});
     setSelectedRowKeys({});
+    setOpenEnvNodeId(null);
+    setInspectNodeId(null);
+    setActiveAudit(null);
     loadAll(false);
   }, [skillId, activeWorkspace]);
 
@@ -257,11 +326,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   }
 
   const triggerBound = (
+    node: DataNode,
+    triggerKind: ActiveBoundActionAudit["triggerKind"],
     trigger: BoundActionTrigger,
     scope: {
       row?: Record<string, unknown>;
       selectedRows?: Record<string, unknown>[];
       cell?: { rowKey: string; colKey: string; value: unknown };
+      scopeSummary?: string;
     }
   ) => {
     const resolvedArgs = interpolateBoundTriggerArgs(trigger.args, {
@@ -269,11 +341,88 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       contextValues: contextState,
       dataSnapshots: snapshots,
     });
-    onExecuteBoundTrigger({
-      actionId: trigger.actionId,
-      mode: trigger.mode || "run",
-      formValues: resolvedArgs,
+    setActiveAudit({
+      node,
+      triggerKind,
+      trigger,
+      resolvedArgs,
+      scopeSummary: scope.scopeSummary,
+      seq: Date.now(),
     });
+  };
+
+  const renderBoundTriggerButton = (
+    node: DataNode,
+    triggerKind: ActiveBoundActionAudit["triggerKind"],
+    trigger: BoundActionTrigger,
+    scope: {
+      row?: Record<string, unknown>;
+      selectedRows?: Record<string, unknown>[];
+      cell?: { rowKey: string; colKey: string; value: unknown };
+      scopeSummary?: string;
+    },
+    key: React.Key,
+    variant: "secondary" | "primary" = "secondary"
+  ) => {
+    const targetInfo = actionsMap.get(trigger.actionId);
+    const targetAction = targetInfo?.action;
+    const isMissing = actionGroups.length > 0 && !targetAction;
+    const dangerLevel = targetAction?.danger || "safe";
+    const hasApprovalFlag = Boolean(targetAction?.requiresHumanApprovalFlag);
+    const resolvedArgs = interpolateBoundTriggerArgs(trigger.args, {
+      ...scope,
+      contextValues: contextState,
+      dataSnapshots: snapshots,
+    });
+    const argsEntries = Object.entries(resolvedArgs);
+    const argsTooltip =
+      argsEntries.length > 0
+        ? argsEntries.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")
+        : "(default parameters)";
+
+    const tooltip = isMissing
+      ? `❌ Missing Action ID "${trigger.actionId}" (not found in actionGroups)`
+      : `Target: ${targetAction?.title || trigger.actionId} (${trigger.actionId}) · Mode: ${
+          trigger.mode || "run"
+        } · Safety: ${dangerLevel}\nResolved Args: ${argsTooltip}\nClick to audit command & execute`;
+
+    return (
+      <button
+        key={key}
+        type="button"
+        onClick={() => triggerBound(node, triggerKind, trigger, scope)}
+        title={tooltip}
+        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all border ${
+          isMissing
+            ? "bg-rose-500/10 text-rose-600 dark:text-rose-300 border-rose-500/40 border-dashed"
+            : variant === "primary"
+              ? "bg-sky-600 hover:bg-sky-500 text-white border-sky-500 shadow-sm"
+              : "st-btn-secondary hover:border-sky-500/50"
+        }`}
+      >
+        {isMissing ? (
+          <AlertTriangle className="w-3 h-3 text-rose-500 shrink-0" />
+        ) : dangerLevel === "danger" ? (
+          <ShieldAlert className="w-3 h-3 text-rose-500 shrink-0" />
+        ) : dangerLevel === "warn" || hasApprovalFlag ? (
+          <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+        ) : (
+          <Play className="w-2.5 h-2.5 text-sky-500 fill-current shrink-0" />
+        )}
+        <span>{trigger.label}</span>
+        <code
+          className={`px-1 py-0.5 rounded text-[10px] font-mono ${
+            isMissing
+              ? "bg-rose-500/20 text-rose-600 dark:text-rose-300"
+              : variant === "primary"
+                ? "bg-black/20 text-white/90"
+                : "bg-black/5 dark:bg-white/10 st-text-muted"
+          }`}
+        >
+          → {trigger.actionId}
+        </code>
+      </button>
+    );
   };
 
   const renderCellContent = (col: TableColumn, rawVal: unknown) => {
@@ -605,7 +754,37 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => setOpenEnvNodeId((prev) => (prev === node.id ? null : node.id))}
+                      onClick={() => {
+                        setInspectNodeId((prev) => (prev === node.id ? null : node.id));
+                        setOpenEnvNodeId(null);
+                      }}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
+                        inspectNodeId === node.id
+                          ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40 shadow-sm"
+                          : "st-btn-secondary border-transparent"
+                      }`}
+                      title="White-box inspect DataNode execution source, bound actions & raw payload"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-sky-500" />
+                      <span>
+                        Inspect
+                        {(() => {
+                          const totalBound =
+                            (node.quickActions?.length || 0) +
+                            (node.rowActions?.length || 0) +
+                            (node.bulkActions?.length || 0) +
+                            (node.cellAction ? 1 : 0);
+                          return totalBound > 0 ? ` (${totalBound})` : "";
+                        })()}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenEnvNodeId((prev) => (prev === node.id ? null : node.id));
+                        setInspectNodeId(null);
+                      }}
                       className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
                         isCustomEnv
                           ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-sm"
@@ -633,6 +812,348 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* White-Box DataNode Inspector Panel (Source / Bound Actions / Raw & DAG) */}
+                {inspectNodeId === node.id &&
+                  (() => {
+                    const activeInspectTab = inspectTabMap[node.id] || "source";
+                    const setInspectTab = (tab: "source" | "actions" | "raw") =>
+                      setInspectTabMap((prev) => ({ ...prev, [node.id]: tab }));
+                    const nodeTriggers: Array<{
+                      kind: ActiveBoundActionAudit["triggerKind"];
+                      trigger: BoundActionTrigger;
+                    }> = [
+                      ...(node.quickActions || []).map((t) => ({
+                        kind: "Quick Action" as const,
+                        trigger: t,
+                      })),
+                      ...(node.rowActions || []).map((t) => ({
+                        kind: "Row Action" as const,
+                        trigger: t,
+                      })),
+                      ...(node.bulkActions || []).map((t) => ({
+                        kind: "Bulk Action" as const,
+                        trigger: t,
+                      })),
+                      ...(node.cellAction
+                        ? [{ kind: "Cell Action" as const, trigger: node.cellAction }]
+                        : []),
+                    ];
+                    const rawYamlSource =
+                      node.script ||
+                      node.command ||
+                      node.code ||
+                      node.sql ||
+                      (Array.isArray(node.pattern)
+                        ? node.pattern.join("\n")
+                        : node.pattern || node.filePath || "");
+                    const resolvedSourceText =
+                      snap?.resolvedSource || rawYamlSource || "(no execution source)";
+                    const sampleRowForAudit: Record<string, unknown> =
+                      Array.isArray(snap?.value?.rows) && snap.value.rows.length > 0
+                        ? snap.value.rows[0]
+                        : Object.fromEntries(
+                            (node.columns || []).map((c) => [c.key, `<${c.key}>`])
+                          );
+
+                    return (
+                      <div className="st-subcard rounded-xl border border-sky-500/30 p-3.5 flex flex-col gap-3 text-xs">
+                        <div className="flex items-center justify-between gap-2 flex-wrap border-b st-border pb-2">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => setInspectTab("source")}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                                activeInspectTab === "source"
+                                  ? "bg-sky-600 text-white"
+                                  : "st-btn-secondary"
+                              }`}
+                            >
+                              <Code2 className="w-3.5 h-3.5" />
+                              <span>Execution Source</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setInspectTab("actions")}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                                activeInspectTab === "actions"
+                                  ? "bg-sky-600 text-white"
+                                  : "st-btn-secondary"
+                              }`}
+                            >
+                              <Play className="w-3 h-3" />
+                              <span>Bound Actions ({nodeTriggers.length})</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setInspectTab("raw")}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                                activeInspectTab === "raw"
+                                  ? "bg-sky-600 text-white"
+                                  : "st-btn-secondary"
+                              }`}
+                            >
+                              <Database className="w-3.5 h-3.5" />
+                              <span>Raw Output & DAG</span>
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => setInspectNodeId(null)}
+                            className="p-1 rounded-lg st-btn-secondary"
+                            title="Close inspector"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        {activeInspectTab === "source" && (
+                          <div className="flex flex-col gap-2.5">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  id: {node.id}
+                                </span>
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  runtime: {node.runtime || "zsh"}
+                                </span>
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  shape: {shape}
+                                </span>
+                                {node.parse?.format && (
+                                  <span className="px-2 py-0.5 rounded st-pill">
+                                    parse: {node.parse.format}
+                                  </span>
+                                )}
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  cwd: {envSummary?.cwd || node.cwd || activeWorkspace}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(resolvedSourceText);
+                                    setCopiedSourceNodeId(node.id);
+                                    setTimeout(() => setCopiedSourceNodeId(null), 1600);
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg st-btn-secondary font-semibold"
+                                >
+                                  {copiedSourceNodeId === node.id ? (
+                                    <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                  ) : (
+                                    <Copy className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>
+                                    {copiedSourceNodeId === node.id ? "Copied" : "Copy Source"}
+                                  </span>
+                                </button>
+
+                                {(node.runtime || "zsh") === "zsh" &&
+                                  resolvedSourceText &&
+                                  onExecute && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        onExecute({
+                                          adHocCommand: resolvedSourceText,
+                                          adHocTitle: `Test DataNode: ${node.title} (${node.id})`,
+                                          runner: "web_terminal",
+                                        })
+                                      }
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+                                      title="Execute this DataNode's resolved shell command in the Web Terminal to inspect raw output"
+                                    >
+                                      <Terminal className="w-3.5 h-3.5" />
+                                      <span>Test in Web Terminal</span>
+                                    </button>
+                                  )}
+                              </div>
+                            </div>
+
+                            <div className="st-code-surface rounded-xl border st-border p-3 font-mono text-xs overflow-x-auto max-h-56 overflow-y-auto">
+                              <div className="text-[10.5px] st-text-muted mb-1">
+                                Resolved Execution Source ({node.runtime || "zsh"}):
+                              </div>
+                              <pre
+                                className="leading-relaxed whitespace-pre-wrap break-all select-all"
+                                dangerouslySetInnerHTML={{
+                                  __html: highlightCodeToHtml(
+                                    resolvedSourceText,
+                                    node.runtime === "python"
+                                      ? "python"
+                                      : node.runtime === "ts"
+                                        ? "ts"
+                                        : "bash",
+                                    true
+                                  ),
+                                }}
+                              />
+                            </div>
+
+                            {rawYamlSource && rawYamlSource !== resolvedSourceText && (
+                              <div className="st-code-surface rounded-xl border st-border p-2.5 font-mono text-[11px] overflow-x-auto">
+                                <div className="text-[10px] st-text-muted mb-1">
+                                  YAML Template Declaration:
+                                </div>
+                                <pre className="whitespace-pre-wrap break-all st-text-secondary">
+                                  {rawYamlSource}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {activeInspectTab === "actions" && (
+                          <div className="flex flex-col gap-2">
+                            {nodeTriggers.length === 0 ? (
+                              <div className="p-3 rounded-lg st-code-surface border st-border st-text-muted text-center">
+                                No bound actions (`rowActions`, `bulkActions`, `quickActions`, or `cellAction`) configured on this DataNode.
+                              </div>
+                            ) : (
+                              <div className="rounded-xl border st-border overflow-x-auto">
+                                <table className="w-full text-left border-collapse text-xs">
+                                  <thead>
+                                    <tr className="border-b st-border st-surface-muted text-[11px] font-bold st-text-secondary uppercase">
+                                      <th className="py-2 px-2.5">Trigger Type</th>
+                                      <th className="py-2 px-2.5">Button Label</th>
+                                      <th className="py-2 px-2.5">Target Action</th>
+                                      <th className="py-2 px-2.5">Mode</th>
+                                      <th className="py-2 px-2.5">Args Template</th>
+                                      <th className="py-2 px-2.5 text-right">Audit</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y st-border">
+                                    {nodeTriggers.map(({ kind, trigger }, tIdx) => {
+                                      const info = actionsMap.get(trigger.actionId);
+                                      return (
+                                        <tr key={tIdx} className="hover:st-surface-muted">
+                                          <td className="py-2 px-2.5 font-mono text-[11px] st-text-secondary">
+                                            {kind}
+                                          </td>
+                                          <td className="py-2 px-2.5 font-semibold st-text-primary">
+                                            {trigger.label}
+                                          </td>
+                                          <td className="py-2 px-2.5">
+                                            {info ? (
+                                              <div className="flex flex-col gap-0.5">
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                  <code className="font-mono font-bold text-sky-600 dark:text-sky-400">
+                                                    {trigger.actionId}
+                                                  </code>
+                                                  <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold">
+                                                    Found
+                                                  </span>
+                                                  {info.action.danger !== "safe" && (
+                                                    <span className="px-1.5 py-0.2 rounded text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-300 font-semibold">
+                                                      {info.action.danger}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                <span className="text-[11px] st-text-secondary">
+                                                  {info.action.title} ({info.groupName})
+                                                </span>
+                                              </div>
+                                            ) : (
+                                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300 font-mono font-semibold">
+                                                ❌ {trigger.actionId} (Not Found)
+                                              </span>
+                                            )}
+                                          </td>
+                                          <td className="py-2 px-2.5 font-mono">
+                                            <span className="px-1.5 py-0.5 rounded st-pill">
+                                              {trigger.mode || "run"}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-2.5 font-mono text-[11px]">
+                                            {trigger.args && Object.keys(trigger.args).length > 0 ? (
+                                              <code className="break-all">
+                                                {JSON.stringify(trigger.args)}
+                                              </code>
+                                            ) : (
+                                              <span className="st-text-muted">(none)</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2 px-2.5 text-right">
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                triggerBound(node, kind, trigger, {
+                                                  row: sampleRowForAudit,
+                                                  selectedRows: [sampleRowForAudit],
+                                                  scopeSummary:
+                                                    Array.isArray(snap?.value?.rows) &&
+                                                    snap.value.rows.length > 0
+                                                      ? "Sampled from Row #1"
+                                                      : "Sampled with column placeholders",
+                                                })
+                                              }
+                                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+                                            >
+                                              <Eye className="w-3 h-3" />
+                                              <span>Audit & Run</span>
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {activeInspectTab === "raw" && (
+                          <div className="flex flex-col gap-2.5">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono text-[11px]">
+                              <div className="p-2 rounded-lg st-code-surface border st-border">
+                                <span className="st-text-muted block text-[10px]">Depends On:</span>
+                                <span className="st-text-primary font-semibold">
+                                  {node.sync?.dependsOn?.join(", ") || "None"}
+                                </span>
+                              </div>
+                              <div className="p-2 rounded-lg st-code-surface border st-border">
+                                <span className="st-text-muted block text-[10px]">Consumed By:</span>
+                                <span className="st-text-primary font-semibold">
+                                  {snap?.consumedBy?.join(", ") || "None"}
+                                </span>
+                              </div>
+                              <div className="p-2 rounded-lg st-code-surface border st-border">
+                                <span className="st-text-muted block text-[10px]">
+                                  Invalidate On Actions:
+                                </span>
+                                <span className="st-text-primary font-semibold">
+                                  {node.sync?.invalidateOnActions?.join(", ") || "None"}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
+                              <div className="st-code-surface rounded-xl border st-border p-2.5 font-mono text-[11px] max-h-52 overflow-y-auto">
+                                <div className="text-[10px] st-text-muted mb-1 font-sans font-semibold">
+                                  Normalized Value (`snap.value`):
+                                </div>
+                                <pre className="whitespace-pre-wrap break-all">
+                                  {JSON.stringify(snap?.value ?? null, null, 2)}
+                                </pre>
+                              </div>
+                              <div className="st-code-surface rounded-xl border st-border p-2.5 font-mono text-[11px] max-h-52 overflow-y-auto">
+                                <div className="text-[10px] st-text-muted mb-1 font-sans font-semibold">
+                                  Raw Stdout / Stderr:
+                                </div>
+                                <pre className="whitespace-pre-wrap break-all">
+                                  {snap?.stdout || snap?.stderr || "(empty)"}
+                                </pre>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                 {/* Command Execution Environment Editor Panel */}
                 {openEnvNodeId === node.id && (
@@ -688,17 +1209,16 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 {node.quickActions && node.quickActions.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                     <span className="text-xs font-semibold st-text-muted mr-1">Quick Actions:</span>
-                    {node.quickActions.map((qa, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => triggerBound(qa, {})}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold st-btn-secondary hover:border-sky-500/50 transition-colors"
-                      >
-                        <Play className="w-2.5 h-2.5 text-sky-500 fill-current" />
-                        <span>{qa.label}</span>
-                      </button>
-                    ))}
+                    {node.quickActions.map((qa, idx) =>
+                      renderBoundTriggerButton(
+                        node,
+                        "Quick Action",
+                        qa,
+                        { scopeSummary: "Card Quick Action" },
+                        idx,
+                        "secondary"
+                      )
+                    )}
                   </div>
                 )}
 
@@ -793,19 +1313,20 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                             <span className="font-semibold text-sky-600 dark:text-sky-300">
                               {selectedRowsList.length} row(s) selected
                             </span>
-                            <div className="flex items-center gap-1.5">
-                              {bulkActions.map((ba, bIdx) => (
-                                <button
-                                  key={bIdx}
-                                  type="button"
-                                  onClick={() =>
-                                    triggerBound(ba, { selectedRows: selectedRowsList })
-                                  }
-                                  className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
-                                >
-                                  {ba.label}
-                                </button>
-                              ))}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {bulkActions.map((ba, bIdx) =>
+                                renderBoundTriggerButton(
+                                  node,
+                                  "Bulk Action",
+                                  ba,
+                                  {
+                                    selectedRows: selectedRowsList,
+                                    scopeSummary: `${selectedRowsList.length} selected row(s)`,
+                                  },
+                                  bIdx,
+                                  "primary"
+                                )
+                              )}
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -834,10 +1355,35 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
 
                         <div className="rounded-xl border st-border overflow-x-auto max-h-72 overflow-y-auto">
                           {filteredRows.length === 0 ? (
-                            <div className="p-4 text-xs st-text-muted text-center">
-                              {node.runtime === "passive"
-                                ? "Waiting for action output..."
-                                : "No matching rows."}
+                            <div className="p-4 text-xs st-text-muted flex flex-col items-center gap-2.5 text-center">
+                              <span>
+                                {node.runtime === "passive"
+                                  ? "Waiting for action output..."
+                                  : "No matching rows."}
+                              </span>
+                              {rowActions.length > 0 && (
+                                <div className="flex items-center justify-center gap-1.5 flex-wrap pt-2 border-t st-border w-full">
+                                  <span className="text-[11px] font-semibold st-text-secondary mr-1">
+                                    Bound Row Actions (click to audit):
+                                  </span>
+                                  {rowActions.map((ra, aIdx) => {
+                                    const placeholderRow = Object.fromEntries(
+                                      cols.map((c) => [c.key, `<${c.key}>`])
+                                    );
+                                    return renderBoundTriggerButton(
+                                      node,
+                                      "Row Action",
+                                      ra,
+                                      {
+                                        row: placeholderRow,
+                                        scopeSummary: "Empty table — using column placeholders",
+                                      },
+                                      aIdx,
+                                      "secondary"
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
                           ) : (
                             <table className="w-full text-left border-collapse">
@@ -889,17 +1435,19 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                       {rowActions.length > 0 && (
                                         <td className="py-2 px-3 text-right whitespace-nowrap">
                                           <div className="inline-flex items-center gap-1.5 justify-end">
-                                            {rowActions.map((ra, aIdx) => (
-                                              <button
-                                                key={aIdx}
-                                                type="button"
-                                                onClick={() => triggerBound(ra, { row })}
-                                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold st-btn-secondary hover:border-sky-500/50 transition-colors"
-                                              >
-                                                <Play className="w-2.5 h-2.5 text-sky-500 fill-current" />
-                                                <span>{ra.label}</span>
-                                              </button>
-                                            ))}
+                                            {rowActions.map((ra, aIdx) =>
+                                              renderBoundTriggerButton(
+                                                node,
+                                                "Row Action",
+                                                ra,
+                                                {
+                                                  row,
+                                                  scopeSummary: `Row ${pk}=${rowKey}`,
+                                                },
+                                                aIdx,
+                                                "secondary"
+                                              )
+                                            )}
                                           </div>
                                         </td>
                                       )}
@@ -940,11 +1488,13 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        triggerBound(node.cellAction!, {
+                                        triggerBound(node, "Cell Action", node.cellAction!, {
                                           cell: { rowKey: rk, colKey: ck, value: cellVal },
+                                          scopeSummary: `Cell [${rk}, ${ck}] = ${String(cellVal ?? "")}`,
                                         })
                                       }
                                       className="px-2 py-0.5 rounded-md st-btn-secondary font-mono text-xs"
+                                      title={`Target: ${node.cellAction.actionId} · Click to audit & run`}
                                     >
                                       {String(cellVal ?? "—")}
                                     </button>
@@ -1011,6 +1561,272 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
           No reactive data nodes match the current filter.
         </div>
       ) : null}
+
+      {/* 4. In-Place Bound Action Audit & Execution Modal */}
+      {activeAudit && (
+        <BoundActionInspectorModal
+          skillId={skillId}
+          activeWorkspace={activeWorkspace}
+          refreshTrigger={refreshTrigger}
+          activeAudit={activeAudit}
+          actionsMap={actionsMap}
+          commandEnvOverrides={commandEnvOverrides}
+          onClose={() => setActiveAudit(null)}
+          onSkillUpdated={onSkillUpdated}
+          onLocateActionInPlayground={onLocateActionInPlayground}
+          onExecute={onExecute}
+          onExecuteBoundTrigger={onExecuteBoundTrigger}
+        />
+      )}
+    </div>
+  );
+};
+
+export interface BoundActionInspectorModalProps {
+  skillId: string;
+  activeWorkspace: string;
+  refreshTrigger: number;
+  activeAudit: ActiveBoundActionAudit;
+  actionsMap: Map<string, { action: ActionItem; groupName: string }>;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  onClose: () => void;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
+  onLocateActionInPlayground?: (actionId: string, formValues: Record<string, unknown>) => void;
+  onExecute?: StatusProbesBarProps["onExecute"];
+  onExecuteBoundTrigger: StatusProbesBarProps["onExecuteBoundTrigger"];
+}
+
+export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps> = ({
+  skillId,
+  activeWorkspace,
+  refreshTrigger,
+  activeAudit,
+  actionsMap,
+  commandEnvOverrides,
+  onClose,
+  onSkillUpdated,
+  onLocateActionInPlayground,
+  onExecute,
+  onExecuteBoundTrigger,
+}) => {
+  const targetInfo = actionsMap.get(activeAudit.trigger.actionId);
+  const targetAction = targetInfo?.action;
+  const rawArgsObj = activeAudit.trigger.args || {};
+  const rawArgEntries = Object.entries(rawArgsObj);
+  const formFields = targetAction?.form || [];
+  const formMap = new Map(formFields.map((f) => [f.key, f]));
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="max-w-3xl w-full max-h-[90vh] overflow-y-auto rounded-2xl st-card p-5 shadow-2xl border st-border-strong flex flex-col gap-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Modal Header: Provenance & Controls */}
+        <div className="flex items-start justify-between gap-3 border-b st-border pb-3">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-500/30">
+                <Eye className="w-3.5 h-3.5" />
+                <span>Bound Action Audit & Execution</span>
+              </span>
+              <span className="px-2 py-0.5 rounded-md text-xs font-mono st-pill">
+                {activeAudit.triggerKind}: "{activeAudit.trigger.label}"
+              </span>
+              <span className="px-2 py-0.5 rounded-md text-xs font-mono st-pill">
+                mode: {activeAudit.trigger.mode || "run"}
+              </span>
+              {activeAudit.scopeSummary && (
+                <span className="px-2 py-0.5 rounded-md text-xs font-mono bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                  {activeAudit.scopeSummary}
+                </span>
+              )}
+            </div>
+            <div className="text-xs st-text-secondary flex items-center gap-1.5 flex-wrap mt-0.5">
+              <span>From DataNode:</span>
+              <code className="font-mono font-semibold st-text-primary">
+                {activeAudit.node.title} ({activeAudit.node.id})
+              </code>
+              <span>→ Target Action:</span>
+              {targetAction ? (
+                <code className="font-mono font-bold text-sky-600 dark:text-sky-400">
+                  {targetAction.title} ({targetAction.id})
+                </code>
+              ) : (
+                <code className="font-mono font-bold text-rose-500">
+                  ❌ {activeAudit.trigger.actionId} (Not Found)
+                </code>
+              )}
+              {targetInfo?.groupName && (
+                <span className="st-text-muted">in {targetInfo.groupName}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {targetAction && (
+              <button
+                type="button"
+                onClick={() => {
+                  const actId = targetAction.id;
+                  const vals = activeAudit.resolvedArgs;
+                  onClose();
+                  if (onLocateActionInPlayground) {
+                    onLocateActionInPlayground(actId, vals);
+                  } else {
+                    onExecuteBoundTrigger({
+                      actionId: actId,
+                      mode: "prefill",
+                      formValues: vals,
+                    });
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold st-btn-secondary"
+                title="Close modal and scroll to this action card in the Playground list below"
+              >
+                <ArrowDownCircle className="w-3.5 h-3.5 text-sky-500" />
+                <span>Locate in Playground</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-xl st-btn-secondary"
+              title="Close (Esc)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Section 1: Argument Binding Mapping Audit Table */}
+        <div className="flex flex-col gap-1.5">
+          <div className="text-xs font-bold st-text-primary flex items-center justify-between">
+            <span>1. Argument Binding Audit (Template → Resolved Row Value → Form Field)</span>
+            <span className="text-[11px] font-mono st-text-muted">
+              {rawArgEntries.length} bound arg(s)
+            </span>
+          </div>
+
+          {rawArgEntries.length === 0 ? (
+            <div className="px-3 py-2 rounded-xl st-subcard border st-border text-xs st-text-muted font-mono">
+              No explicit `args` mapping on this trigger — using target action's default form parameters.
+            </div>
+          ) : (
+            <div className="rounded-xl border st-border overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b st-border st-subcard text-[11px] font-bold st-text-secondary uppercase">
+                    <th className="py-1.5 px-3">Form Key</th>
+                    <th className="py-1.5 px-3">YAML Binding Template</th>
+                    <th className="py-1.5 px-3">Resolved Value</th>
+                    <th className="py-1.5 px-3">Target Form Field Match</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y st-border font-mono">
+                  {rawArgEntries.map(([k, rawVal]) => {
+                    const resolvedVal = activeAudit.resolvedArgs[k];
+                    const matchedField = formMap.get(k);
+                    const isEmptyRequired =
+                      matchedField?.required &&
+                      (resolvedVal === "" ||
+                        resolvedVal === undefined ||
+                        resolvedVal === null);
+                    return (
+                      <tr key={k} className="hover:st-surface-muted">
+                        <td className="py-1.5 px-3 font-bold text-sky-600 dark:text-sky-400">
+                          {k}
+                        </td>
+                        <td className="py-1.5 px-3 st-text-secondary break-all">
+                          {String(rawVal)}
+                        </td>
+                        <td className="py-1.5 px-3 font-semibold st-text-primary break-all">
+                          {JSON.stringify(resolvedVal)}
+                        </td>
+                        <td className="py-1.5 px-3 font-sans">
+                          {!targetAction ? (
+                            <span className="text-rose-500 font-semibold">
+                              ❌ Target action missing
+                            </span>
+                          ) : !matchedField ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 font-semibold text-[11px]">
+                              ⚠️ Unmatched key (not in target form)
+                            </span>
+                          ) : isEmptyRequired ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 font-semibold text-[11px]">
+                              ⚠️ Required field resolved to empty ({matchedField.label})
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold text-[11px]">
+                              ✅ {matchedField.label} ({matchedField.type}
+                              {matchedField.flag
+                                ? ` · ${matchedField.flag}`
+                                : matchedField.positional
+                                  ? " · positional"
+                                  : ""}
+                              )
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Section 2: Interactive ActionCard or Missing Target Diagnostics */}
+        {targetAction ? (
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-bold st-text-primary">
+              2. Interactive Parameter Form, Command Preview & Execution
+            </div>
+            <ActionCard
+              key={`${targetAction.id}-${activeAudit.seq}`}
+              skillId={skillId}
+              action={targetAction}
+              activeWorkspace={activeWorkspace}
+              refreshTrigger={refreshTrigger}
+              prefillValues={activeAudit.resolvedArgs}
+              uiEnvOverride={commandEnvOverrides?.[`action:${targetAction.id}`]}
+              inAuditModal={true}
+              onExecuted={onClose}
+              onSkillUpdated={onSkillUpdated}
+              onExecute={async (p) => {
+                if (onExecute) {
+                  await onExecute(p);
+                } else {
+                  await onExecuteBoundTrigger({
+                    actionId: p.actionId,
+                    mode: "run",
+                    formValues: p.formValues,
+                  });
+                }
+              }}
+            />
+          </div>
+        ) : (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300 flex flex-col gap-2">
+            <div className="font-bold flex items-center gap-1.5">
+              <AlertTriangle className="w-4 h-4 text-rose-500" />
+              <span>
+                Broken Action Reference: `{activeAudit.trigger.actionId}` does not exist in `actionGroups`.
+              </span>
+            </div>
+            <p>
+              Available action IDs in this skill:{" "}
+              <code className="font-mono">
+                {[...actionsMap.keys()].join(", ") || "(none)"}
+              </code>
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

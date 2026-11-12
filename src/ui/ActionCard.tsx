@@ -28,6 +28,8 @@ interface ActionCardProps {
   refreshTrigger?: number;
   prefillValues?: Record<string, unknown> | null;
   uiEnvOverride?: CommandEnvConfig;
+  inAuditModal?: boolean;
+  onExecuted?: () => void;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onExecute: (params: {
     actionId: string;
@@ -50,6 +52,8 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   refreshTrigger = 0,
   prefillValues,
   uiEnvOverride,
+  inAuditModal = false,
+  onExecuted,
   onSkillUpdated,
   onExecute,
 }) => {
@@ -242,6 +246,25 @@ export const ActionCard: React.FC<ActionCardProps> = ({
     }
 
     if (action.danger === "danger" || action.danger === "warn" || action.requiresHumanApprovalFlag) {
+      if (inAuditModal) {
+        if (action.danger === "danger" && dangerConfirmInput.trim() !== action.id) {
+          setErrorMsg(`Please type "${action.id}" in the confirmation box to unlock execution.`);
+          return;
+        }
+        try {
+          await onExecute({
+            actionId: action.id,
+            formValues,
+            runner,
+            terminalApp,
+            humanApproved: true,
+          });
+          onExecuted?.();
+        } catch (err: any) {
+          setErrorMsg(err?.message || "Execution failed");
+        }
+        return;
+      }
       setPendingRunner({ runner, terminalApp });
       setDangerConfirmInput("");
       setApprovalModalOpen(true);
@@ -256,6 +279,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
         terminalApp,
         humanApproved: false,
       });
+      onExecuted?.();
     } catch (err: any) {
       setErrorMsg(err?.message || "Execution failed");
     }
@@ -275,6 +299,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
         terminalApp: pendingRunner.terminalApp,
         humanApproved: true,
       });
+      onExecuted?.();
     } catch (err: any) {
       setErrorMsg(err?.message || "Execution failed");
     }
@@ -685,6 +710,34 @@ export const ActionCard: React.FC<ActionCardProps> = ({
         </button>
       </div>
 
+      {inAuditModal && (action.danger === "danger" || action.requiresHumanApprovalFlag) && (
+        <div className="px-3.5 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col gap-2 text-xs">
+          {action.requiresHumanApprovalFlag && (
+            <div className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1.5">
+              <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Human Approval Gate: clicking Run will inject{" "}
+                <code className="font-mono font-bold">{action.requiresHumanApprovalFlag}</code>.
+              </span>
+            </div>
+          )}
+          {action.danger === "danger" && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-rose-600 dark:text-rose-300 font-semibold">
+                Destructive Gate — type <code className="font-mono font-bold">{action.id}</code> to unlock:
+              </span>
+              <input
+                type="text"
+                value={dangerConfirmInput}
+                onChange={(e) => setDangerConfirmInput(e.target.value)}
+                placeholder={action.id}
+                className="px-2.5 py-1 rounded-lg st-input text-xs font-mono w-48"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {errorMsg && (
         <div className="px-3.5 py-2 rounded-lg bg-rose-500/15 border border-rose-500/30 text-xs text-rose-500 font-medium">
           {errorMsg}
@@ -706,7 +759,15 @@ export const ActionCard: React.FC<ActionCardProps> = ({
             }`}
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>{action.interactive ? "Launch Interactive TUI" : "Run in Web PTY"}</span>
+            <span>
+              {action.interactive
+                ? "Launch Interactive TUI"
+                : inAuditModal && (action.danger === "warn" || action.danger === "danger" || action.requiresHumanApprovalFlag)
+                  ? "Approve & Run in Web Terminal"
+                  : inAuditModal
+                    ? "Run in Web Terminal"
+                    : "Run in Web PTY"}
+            </span>
           </button>
 
           <button

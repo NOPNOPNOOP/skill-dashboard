@@ -193,6 +193,11 @@ data:
           files: "{{selected.name}}" # comma-joined list of selected row values
 ```
 
+> **In-Place Bound Action Audit & White-Box `🔍 Inspect`**:
+> - Every bound trigger button (`rowActions`, `bulkActions`, `quickActions`, `cellAction`) displays its target `→ <actionId>` badge and hover argument preview, and clicking it opens the **In-Place Bound Action Audit & Execution Modal** (showing the `Form Key` $\leftarrow$ `YAML Template` $\leftarrow$ `Resolved Row Value` mapping table and an embedded `ActionCard` with live command preview and one-click execution).
+> - Every `DataNode` card header also includes a **`🔍 Inspect`** button exposing 3 white-box tabs: **`</> Execution Source`** (showing `DataSnapshot.resolvedSource` + **`▶ Test in Web Terminal`**), **`⚡ Bound Actions (N)`**, and **`📄 Raw Output & DAG`**.
+> - **Best Practice for Formatted Table Columns**: If a `runtime: ts` table formats a column for UI display (e.g. `doc_id: "#597"`), also include the clean raw field in the row object (e.g. `raw_doc_id: "597"`) and reference `{{row.raw_doc_id}}` in `rowActions.args` so CLI flags receive `"597"` rather than `"#597"`.
+
 ---
 
 ## 5. Reactivity, DAG Chaining (`sync:`) & `output.intoData` Feedback Loop

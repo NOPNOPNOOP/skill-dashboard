@@ -987,6 +987,7 @@ export class ReactiveGraphEngine {
             hasUiOverride: nodeEnv.hasUiOverride,
             badgeText: nodeEnv.badgeText,
           },
+          resolvedSource: execOut.resolvedSource,
           shape: node.shape || "raw",
           runtime: node.runtime || "zsh",
           status: execOut.exitCode === 0 ? "ready" : "error",
@@ -1015,6 +1016,16 @@ export class ReactiveGraphEngine {
         return snapshot;
       } catch (err: any) {
         const errMsg = err?.message || String(err);
+        const fallbackSource = this.interpolateText(
+          skill,
+          node.script ||
+            node.command ||
+            node.code ||
+            node.sql ||
+            (Array.isArray(node.pattern) ? node.pattern.join("\n") : node.pattern || node.filePath || ""),
+          (node.runtime || "zsh") === "zsh",
+          nodeEnv
+        );
         const errSnap: DataSnapshot = {
           nodeId: node.id,
           title: node.title,
@@ -1035,6 +1046,7 @@ export class ReactiveGraphEngine {
             hasUiOverride: nodeEnv.hasUiOverride,
             badgeText: nodeEnv.badgeText,
           },
+          resolvedSource: fallbackSource || undefined,
           shape: node.shape || "raw",
           runtime: node.runtime || "zsh",
           status: "error",
@@ -1204,6 +1216,7 @@ export class ReactiveGraphEngine {
     stderr: string;
     exitCode: number;
     timedOut: boolean;
+    resolvedSource?: string;
   }> {
     const runtime = node.runtime || "zsh";
     const nodeEnv = this.resolveNodeEnvironment(skill, node);
@@ -1224,6 +1237,7 @@ export class ReactiveGraphEngine {
         stderr: "",
         exitCode: 0,
         timedOut: false,
+        resolvedSource: "(passive node — populated via Action output.intoData)",
       };
     }
 
@@ -1236,6 +1250,7 @@ export class ReactiveGraphEngine {
       const valueFormat = node.valueFormat || "basename";
       const rows: Record<string, unknown>[] = [];
       const seen = new Set<string>();
+      const resolvedGlobPaths: string[] = [];
 
       for (const rawPat of rawPatterns) {
         const expanded = this.interpolateText(skill, rawPat, false, nodeEnv);
@@ -1244,6 +1259,7 @@ export class ReactiveGraphEngine {
           : isAbsolute(expanded)
             ? expanded
             : resolve(cwd, expanded);
+        resolvedGlobPaths.push(resolvedPath);
         const dirPath = dirname(resolvedPath);
         const fileGlob = basename(resolvedPath);
         if (!existsSync(dirPath) || !statSync(dirPath).isDirectory()) continue;
@@ -1291,7 +1307,14 @@ export class ReactiveGraphEngine {
           });
         }
       }
-      return { structured: rows, stdout: JSON.stringify(rows), stderr: "", exitCode: 0, timedOut: false };
+          return {
+            structured: rows,
+            stdout: JSON.stringify(rows),
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+            resolvedSource: resolvedGlobPaths.join("\n"),
+          };
     }
 
     if (runtime === "file") {
@@ -1301,23 +1324,23 @@ export class ReactiveGraphEngine {
         : rawExpanded;
       const target = isAbsolute(expandedPath) ? expandedPath : resolve(cwd, expandedPath);
       if (!existsSync(target) || !statSync(target).isFile()) {
-        return { stdout: "", stderr: `File not found: ${expandedPath}`, exitCode: 1, timedOut: false };
+        return { stdout: "", stderr: `File not found: ${expandedPath}`, exitCode: 1, timedOut: false, resolvedSource: target };
       }
       const raw = readFileSync(target, "utf-8");
       const ext = extname(target).toLowerCase();
       if (ext === ".json") {
-        return { structured: JSON.parse(raw), stdout: raw, stderr: "", exitCode: 0, timedOut: false };
+        return { structured: JSON.parse(raw), stdout: raw, stderr: "", exitCode: 0, timedOut: false, resolvedSource: target };
       }
       if (ext === ".yaml" || ext === ".yml") {
-        return { structured: YAML.parse(raw), stdout: raw, stderr: "", exitCode: 0, timedOut: false };
+        return { structured: YAML.parse(raw), stdout: raw, stderr: "", exitCode: 0, timedOut: false, resolvedSource: target };
       }
       if (ext === ".csv") {
-        return { structured: parseDelimitedTable(raw, ","), stdout: raw, stderr: "", exitCode: 0, timedOut: false };
+        return { structured: parseDelimitedTable(raw, ","), stdout: raw, stderr: "", exitCode: 0, timedOut: false, resolvedSource: target };
       }
       if (ext === ".tsv") {
-        return { structured: parseDelimitedTable(raw, "\t"), stdout: raw, stderr: "", exitCode: 0, timedOut: false };
+        return { structured: parseDelimitedTable(raw, "\t"), stdout: raw, stderr: "", exitCode: 0, timedOut: false, resolvedSource: target };
       }
-      return { stdout: raw, stderr: "", exitCode: 0, timedOut: false };
+      return { stdout: raw, stderr: "", exitCode: 0, timedOut: false, resolvedSource: target };
     }
 
     if (runtime === "sqlite") {
@@ -1326,10 +1349,11 @@ export class ReactiveGraphEngine {
         ? join(osModule.homedir(), rawDb.slice(2))
         : rawDb;
       const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(cwd, dbRaw);
-      if (!existsSync(dbPath)) {
-        return { stdout: "", stderr: `SQLite DB not found: ${dbRaw}`, exitCode: 1, timedOut: false };
-      }
       const sqlText = this.interpolateText(skill, node.sql || "", false, nodeEnv);
+      const sqliteSummary = `-- db: ${dbPath}\n${sqlText}`;
+      if (!existsSync(dbPath)) {
+        return { stdout: "", stderr: `SQLite DB not found: ${dbRaw}`, exitCode: 1, timedOut: false, resolvedSource: sqliteSummary };
+      }
       const sqldb = new Database(dbPath, { readonly: true });
       try {
         const ctxState = this.getContextState(skill);
@@ -1344,6 +1368,7 @@ export class ReactiveGraphEngine {
           stderr: "",
           exitCode: 0,
           timedOut: false,
+          resolvedSource: sqliteSummary,
         };
       } finally {
         sqldb.close();
@@ -1370,6 +1395,7 @@ export class ReactiveGraphEngine {
         stderr: "",
         exitCode: 0,
         timedOut: false,
+        resolvedSource: interpolatedCode,
       };
     }
 
@@ -1381,7 +1407,7 @@ export class ReactiveGraphEngine {
           : "";
       const interpolatedCode = this.interpolateText(skill, rawCode, false, nodeEnv);
       const ctxObj = this.buildExecutionContext(skill, {}, nodeEnv);
-      return this.execPythonStructured({
+      const pyRes = await this.execPythonStructured({
         pythonBin: nodeEnv.pythonRaw,
         code: interpolatedCode,
         ctxObj,
@@ -1390,12 +1416,16 @@ export class ReactiveGraphEngine {
         env: { ...sandboxEnv, ...nodeEnv.realEnv },
         timeoutMs,
       });
+      return {
+        ...pyRes,
+        resolvedSource: interpolatedCode,
+      };
     }
 
     // Default runtime === "zsh"
     const rawCmd = node.script || node.command || "";
     const command = this.interpolateText(skill, rawCmd, true, nodeEnv);
-    return this.execFastShell({
+    const zshRes = await this.execFastShell({
       command,
       cwd: nodeEnv.cwd,
       venvDir: nodeEnv.venvDir,
@@ -1405,6 +1435,10 @@ export class ReactiveGraphEngine {
       },
       timeoutMs,
     });
+    return {
+      ...zshRes,
+      resolvedSource: command,
+    };
   }
 
   private async runTransform(

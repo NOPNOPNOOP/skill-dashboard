@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -11,8 +12,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
+import { interpolateBoundTriggerArgs } from "../src/interpolator.ts";
 import {
   buildManifestSymbolGraph,
   formatManifestMapReport,
@@ -2311,6 +2313,265 @@ actionGroups:
       expect(resetRes.snapshot.value.record.cwd).toContain("ws-default");
       expect(resetRes.snapshot.value.record.stage).toBe("dev_default");
       expect(resetRes.snapshot.resolvedEnv.isCustom).toBe(false);
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  test("16. DataNode White-Box Source Inspection (resolvedSource) & Bound Action Argument Audit", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-test-16-"));
+    const agentsDir = join(tmpBase, "agents");
+    const skillDir = join(agentsDir, "audit-skill");
+    const wsDir = join(tmpBase, "workspace");
+
+    mkdirSync(join(skillDir, ".dashboard"), { recursive: true });
+    mkdirSync(join(skillDir, "tools"), { recursive: true });
+    mkdirSync(join(wsDir, ".venv/bin"), { recursive: true });
+
+    const pyWrapper = join(wsDir, ".venv/bin/python");
+    writeFileSync(
+      pyWrapper,
+      `#!/bin/sh\nexec python3 "$@"\n`,
+      { mode: 0o755 }
+    );
+    writeFileSync(
+      join(skillDir, "tools/inspect_doc.py"),
+      `import sys\nprint("INSPECT:", sys.argv[1:])\n`,
+      { mode: 0o755 }
+    );
+    writeFileSync(
+      join(skillDir, "tools/sample.json"),
+      JSON.stringify([{ id: "660", title: "ERS-660" }])
+    );
+    const sqlitePath = join(skillDir, "tools/metrics.db");
+    const testDb = new Database(sqlitePath);
+    testDb.run("CREATE TABLE metrics (k TEXT, v INTEGER); INSERT INTO metrics VALUES ('acc', 100);");
+    testDb.close();
+
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      `---\nname: audit-skill\ndescription: Audit test skill\n---\n# Audit Skill\n`
+    );
+
+    const manifestYaml = `
+id: audit-skill
+name: Audit Skill
+category: Engineering Tools
+description: White-box inspection and bound action audit test
+defaultWorkspace: "${wsDir}"
+tsPrelude: true
+context:
+  - key: env_mode
+    label: Env Mode
+    type: select
+    default: uat
+    options:
+      - { label: UAT, value: uat }
+      - { label: PROD, value: prod }
+data:
+  - id: zsh-node
+    title: Zsh Query Node
+    runtime: zsh
+    command: "{{python}} {{skill_dir}}/tools/inspect_doc.py --env {{context.env_mode}}"
+    shape: raw
+    quickActions:
+      - label: Quick Inspect
+        actionId: inspect-case
+        mode: run
+        args:
+          doc_id: "999"
+          field: "{{context.env_mode}}"
+  - id: glob-node
+    title: Glob Files Node
+    runtime: glob
+    pattern:
+      - "{{skill_dir}}/tools/*.json"
+    valueFormat: basename
+    shape: table
+    primaryKey: name
+  - id: file-node
+    title: File JSON Node
+    runtime: file
+    filePath: "{{skill_dir}}/tools/sample.json"
+    shape: table
+    primaryKey: id
+  - id: sqlite-node
+    title: SQLite Metrics Node
+    runtime: sqlite
+    db: "{{skill_dir}}/tools/metrics.db"
+    sql: "SELECT k, v FROM metrics WHERE k = 'acc'"
+    shape: table
+    primaryKey: k
+  - id: py-node
+    title: Python Structured Node
+    runtime: python
+    shape: matrix
+    code: |
+      def main(ctx):
+          return {
+              "rowKeys": ["R1"],
+              "colKeys": ["C1"],
+              "cells": {"R1": {"C1": "val_1"}}
+          }
+    cellAction:
+      label: Cell Inspect
+      actionId: inspect-case
+      mode: prefill
+      args:
+        doc_id: "{{cell.rowKey}}"
+        field: "{{cell.colKey}}_{{cell.value}}"
+  - id: docs-table
+    title: Golden Docs Table
+    runtime: ts
+    prelude: true
+    shape: table
+    primaryKey: doc_id
+    code: |
+      return [
+        { doc_id: "#660", raw_doc_id: "660", field: "discharge_specs" },
+        { doc_id: "#664", raw_doc_id: "664", field: "charge_specs" }
+      ];
+    columns:
+      - { key: doc_id, label: "Doc ID", type: code }
+      - { key: field, label: "Field", type: text }
+    rowActions:
+      - label: Inspect Case
+        actionId: inspect-case
+        mode: prefill
+        args:
+          doc_id: "{{row.raw_doc_id}}"
+          field: "{{row.field}}"
+    bulkActions:
+      - label: Bulk Inspect
+        actionId: inspect-case
+        mode: run
+        args:
+          doc_id: "{{selected.raw_doc_id}}"
+          field: "bulk_mode"
+actionGroups:
+  - name: Diagnostics
+    actions:
+      - id: inspect-case
+        title: Inspect Mismatch Case
+        danger: warn
+        command: "{{python}} {{skill_dir}}/tools/inspect_doc.py {{form.doc_id}} {{form.field}}"
+        form:
+          - key: doc_id
+            label: Document ID
+            type: text
+            positional: true
+            required: true
+          - key: field
+            label: Field Key
+            type: text
+            positional: true
+            required: true
+`;
+    writeFileSync(join(skillDir, ".dashboard/manifest.yaml"), manifestYaml.trim() + "\n");
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: wsDir,
+      homeDir: tmpBase,
+    });
+
+    try {
+      const dataRes = (await (await fetch(`${srv.url}/api/skills/audit-skill/data`)).json()) as any;
+      const zshSnap = dataRes.snapshots["zsh-node"];
+      const globSnap = dataRes.snapshots["glob-node"];
+      const fileSnap = dataRes.snapshots["file-node"];
+      const sqliteSnap = dataRes.snapshots["sqlite-node"];
+      const pySnap = dataRes.snapshots["py-node"];
+      const tsSnap = dataRes.snapshots["docs-table"];
+
+      // 1. Verify resolvedSource is populated on DataSnapshot across all 6 active runtimes
+      expect(typeof zshSnap.resolvedSource).toBe("string");
+      expect(zshSnap.resolvedSource).toContain(join(wsDir, ".venv/bin/python"));
+      expect(zshSnap.resolvedSource).toContain("--env uat");
+
+      expect(typeof globSnap.resolvedSource).toBe("string");
+      expect(globSnap.resolvedSource).toContain("audit-skill/tools/*.json");
+
+      expect(typeof fileSnap.resolvedSource).toBe("string");
+      expect(fileSnap.resolvedSource).toContain("audit-skill/tools/sample.json");
+
+      expect(typeof sqliteSnap.resolvedSource).toBe("string");
+      expect(sqliteSnap.resolvedSource).toContain("audit-skill/tools/metrics.db");
+      expect(sqliteSnap.resolvedSource).toContain("SELECT k, v FROM metrics");
+
+      expect(typeof pySnap.resolvedSource).toBe("string");
+      expect(pySnap.resolvedSource).toContain("def main(ctx):");
+
+      expect(typeof tsSnap.resolvedSource).toBe("string");
+      expect(tsSnap.resolvedSource).toContain("raw_doc_id");
+
+      // 2. Verify interpolateBoundTriggerArgs + /api/preview-command across rowActions, bulkActions, quickActions, and cellAction
+      const row = tsSnap.value.rows[0];
+      const rowTrigger = tsSnap.rowActions[0];
+      const resolvedRowArgs = interpolateBoundTriggerArgs(rowTrigger.args, {
+        row,
+        contextValues: dataRes.context,
+        dataSnapshots: dataRes.snapshots,
+      });
+      expect(resolvedRowArgs).toEqual({ doc_id: "660", field: "discharge_specs" });
+
+      const prevRowRes = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "audit-skill",
+            actionId: rowTrigger.actionId,
+            formValues: resolvedRowArgs,
+          }),
+        })
+      ).json()) as any;
+      expect(prevRowRes.maskedCommand).toContain("inspect_doc.py 660 discharge_specs");
+      expect(prevRowRes.maskedCommand).not.toContain("#660");
+
+      const bulkTrigger = tsSnap.bulkActions[0];
+      const resolvedBulkArgs = interpolateBoundTriggerArgs(bulkTrigger.args, {
+        selectedRows: tsSnap.value.rows,
+        contextValues: dataRes.context,
+      });
+      expect(resolvedBulkArgs).toEqual({ doc_id: "660,664", field: "bulk_mode" });
+
+      const quickTrigger = zshSnap.quickActions[0];
+      const resolvedQuickArgs = interpolateBoundTriggerArgs(quickTrigger.args, {
+        contextValues: dataRes.context,
+      });
+      expect(resolvedQuickArgs).toEqual({ doc_id: "999", field: "uat" });
+
+      const cellTrigger = pySnap.cellAction;
+      const resolvedCellArgs = interpolateBoundTriggerArgs(cellTrigger.args, {
+        cell: { rowKey: "R1", colKey: "C1", value: "val_1" },
+      });
+      expect(resolvedCellArgs).toEqual({ doc_id: "R1", field: "C1_val_1" });
+
+      // 3. Verify 3-tier manifest validation on audit-skill and vsip (when installed)
+      const bootRes = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+      const auditSkillObj = bootRes.skills.find((s: any) => s.id === "audit-skill");
+      expect(validateSkillManifest3Tier(auditSkillObj)).toEqual([]);
+
+      const vsipDir = join(homedir(), ".agents/skills/vsip");
+      if (existsSync(join(vsipDir, ".dashboard/manifest.yaml"))) {
+        const proc = Bun.spawnSync(["bun", "src/manifest-cli.ts", "validate", "vsip"], {
+          cwd: process.cwd(),
+        });
+        expect(proc.exitCode).toBe(0);
+        const evalMod = readFileSync(
+          join(vsipDir, ".dashboard/modules/03-3-accuracy-war-room-doc-eval.yaml"),
+          "utf-8"
+        );
+        expect(evalMod).toContain("raw_doc_id: String(d.doc_id)");
+        expect(evalMod).toContain('doc_id: "{{row.raw_doc_id}}"');
+      }
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });
