@@ -1049,10 +1049,10 @@ export const App: React.FC = () => {
               setWorkspaceModalOpen(true);
             }}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl st-btn-secondary text-xs transition-colors"
-            title={`Bound Workspace for ${selectedSkill?.id || "skill"}: ${effectiveWorkspace}`}
+            title="Default workspace preference for this skill (commands inherit this unless overridden via their ⚙️ Env button)"
           >
             <FolderGit2 className="w-3.5 h-3.5 text-sky-500" />
-            <span className="st-text-muted">{selectedSkill?.id} cwd:</span>
+            <span className="st-text-muted">{selectedSkill?.id} Default cwd:</span>
             <span className="font-mono font-semibold st-text-primary max-w-[200px] truncate">
               {effectiveWorkspace.split("/").slice(-2).join("/")}
             </span>
@@ -1071,10 +1071,10 @@ export const App: React.FC = () => {
           <button
             onClick={() => setEnvModalOpen(true)}
             className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl st-btn-secondary text-xs font-semibold"
-            title="Configure Environment Variables for this Skill"
+            title="Configure Default Environment Variables Preference for this Skill"
           >
             <KeyRound className="w-3.5 h-3.5 text-amber-500" />
-            <span>Env ({Object.keys(selectedSkill?.configuredEnv || {}).length})</span>
+            <span>Default Env ({Object.keys(selectedSkill?.configuredEnv || {}).length})</span>
           </button>
 
           {/* Quick Interactive Shell Button in Header (Issue 08) */}
@@ -1850,6 +1850,10 @@ export const App: React.FC = () => {
                   activeWorkspace={effectiveWorkspace}
                   refreshTrigger={refreshTrigger}
                   prefillRequest={prefillRequest}
+                  commandEnvOverrides={selectedSkill.commandEnvOverrides}
+                  onSkillUpdated={(updated) =>
+                    setSkills((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
+                  }
                   onPrefillJump={handlePrefillActionJump}
                   onContextChanged={() => setRefreshTrigger((prev) => prev + 1)}
                   onExecute={(p) => handleExecuteAction(p)}

@@ -59,10 +59,12 @@ function findWorkspaceVenvDir(workspacePath: string): string | null {
 function createInteractiveZdotDir(params: {
   cwd: string;
   skillDir: string;
+  venvDir?: string | null;
   env?: Record<string, string>;
 }): string {
   const zdot = mkdtempSync(join(tmpdir(), "skill-dashboard-zsh-"));
-  const venvDir = findWorkspaceVenvDir(params.cwd);
+  const venvDir =
+    params.venvDir !== undefined ? params.venvDir : findWorkspaceVenvDir(params.cwd);
   const envExports = Object.entries(params.env || {})
     .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
     .join("\n");
@@ -105,6 +107,7 @@ export class RunExecutionManager {
     command: string;
     maskedCommand: string;
     cwd: string;
+    venvDir?: string | null;
     env?: Record<string, string>;
     maskedParams: Record<string, unknown>;
     interactive?: boolean;
@@ -127,6 +130,7 @@ export class RunExecutionManager {
       tempZdotDir = createInteractiveZdotDir({
         cwd: params.cwd,
         skillDir: params.skillDir || params.cwd,
+        venvDir: params.venvDir,
         env: params.env,
       });
     }
@@ -192,7 +196,8 @@ export class RunExecutionManager {
           ? ["/bin/zsh", tempScriptPath]
           : ["/bin/zsh", "-c", params.command];
 
-    const venvDir = findWorkspaceVenvDir(params.cwd);
+    const venvDir =
+      params.venvDir !== undefined ? params.venvDir : findWorkspaceVenvDir(params.cwd);
     const basePath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
 
     const proc = Bun.spawn(spawnArgs, {
@@ -540,13 +545,24 @@ export function buildAppleScriptTerminalCommand(params: {
   command: string;
   cwd: string;
   terminalApp?: "Terminal" | "iTerm";
+  env?: Record<string, string>;
+  venvDir?: string | null;
 }): string {
   let execTarget = params.command;
   if (params.command.includes("\n")) {
     const scriptPath = writeIsolatedShellScript(params.command);
     execTarget = `/bin/zsh ${shellEscape(scriptPath)}`;
   }
-  const fullShellCmd = `cd ${JSON.stringify(params.cwd)} && ${execTarget}`;
+  const envExports = Object.entries(params.env || {})
+    .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
+    .join(" && ");
+  const venvExport = params.venvDir
+    ? `export VIRTUAL_ENV=${shellEscape(params.venvDir)} && export PATH="${params.venvDir}/bin:$PATH"`
+    : "";
+  const prefixParts = [envExports, venvExport].filter(Boolean).join(" && ");
+  const fullShellCmd = prefixParts
+    ? `cd ${JSON.stringify(params.cwd)} && ${prefixParts} && ${execTarget}`
+    : `cd ${JSON.stringify(params.cwd)} && ${execTarget}`;
   const escapedForAppleScript = fullShellCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   if (params.terminalApp === "iTerm") {
     return `
@@ -576,6 +592,8 @@ export async function launchExternalMacTerminal(params: {
   command: string;
   cwd: string;
   terminalApp?: "Terminal" | "iTerm";
+  env?: Record<string, string>;
+  venvDir?: string | null;
 }): Promise<{ launched: boolean; appleScript: string }> {
   const appleScript = buildAppleScriptTerminalCommand(params);
   if (process.platform === "darwin") {

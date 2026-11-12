@@ -10,7 +10,14 @@ import {
   Sliders,
 } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import type { ActionGroup, ActionItem, ContextField, DataNode } from "../types.ts";
+import type {
+  ActionGroup,
+  ActionItem,
+  CanonicalSkill,
+  CommandEnvConfig,
+  ContextField,
+  DataNode,
+} from "../types.ts";
 import { ActionCard } from "./ActionCard.tsx";
 import { StatusProbesBar } from "./StatusProbesBar.tsx";
 
@@ -22,6 +29,8 @@ interface MultiLevelPlaygroundProps {
   activeWorkspace: string;
   refreshTrigger: number;
   prefillRequest: { actionId: string; formValues: Record<string, unknown>; seq: number } | null;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   onPrefillJump: (actionId: string, formValues: Record<string, unknown>) => void;
   onContextChanged?: () => void;
   onExecute: (params: {
@@ -41,6 +50,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   activeWorkspace,
   refreshTrigger,
   prefillRequest,
+  commandEnvOverrides,
+  onSkillUpdated,
   onPrefillJump,
   onContextChanged,
   onExecute,
@@ -147,6 +158,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
         dataNodes={dataNodes || []}
         activeWorkspace={activeWorkspace}
         refreshTrigger={refreshTrigger}
+        commandEnvOverrides={commandEnvOverrides}
+        onSkillUpdated={onSkillUpdated}
         onContextChanged={() => onContextChanged?.()}
         onExecuteBoundTrigger={async ({ actionId, mode, formValues }) => {
           const targetAction = allActionsMap.get(actionId);
@@ -184,6 +197,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                 prefillValues={
                   prefillRequest?.actionId === action.id ? prefillRequest.formValues : null
                 }
+                uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
+                onSkillUpdated={onSkillUpdated}
                 onExecute={onExecute}
               />
             ))}
@@ -366,6 +381,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                                   ? prefillRequest.formValues
                                   : null
                               }
+                              uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
+                              onSkillUpdated={onSkillUpdated}
                               onExecute={onExecute}
                             />
                           ))}
@@ -376,6 +393,13 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                             const isFocused = focusedActionId === action.id;
                             const paramCount = action.form?.length || 0;
                             const quickRunnable = canQuickRun(action);
+                            const hasCustomEnv = Boolean(
+                              commandEnvOverrides?.[`action:${action.id}`] ||
+                              (action.cwd && action.cwd !== "project_root") ||
+                              action.env ||
+                              action.envFile ||
+                              action.python
+                            );
 
                             return (
                               <div
@@ -436,6 +460,11 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                                     className="flex items-center gap-2 shrink-0"
                                     onClick={(e) => e.stopPropagation()}
                                   >
+                                    {hasCustomEnv && (
+                                      <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                                        ⚙️ Custom Env
+                                      </span>
+                                    )}
                                     <span className="px-2 py-1 rounded-md text-xs font-mono st-pill flex items-center gap-1">
                                       <Sliders className="w-3 h-3" />
                                       {paramCount === 0 ? "No params" : `${paramCount} params`}
@@ -484,6 +513,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                                           ? prefillRequest.formValues
                                           : null
                                       }
+                                      uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
+                                      onSkillUpdated={onSkillUpdated}
                                       onExecute={onExecute}
                                     />
                                   </div>

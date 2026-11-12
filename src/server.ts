@@ -45,6 +45,7 @@ import { injectSkillDashboardBridge, ReactiveGraphEngine } from "./probes.ts";
 import type {
   AgentMountRoot,
   CanonicalSkill,
+  CommandEnvConfig,
   DashboardServerOptions,
   UnconfiguredFolderAction,
   UnitEvent,
@@ -176,6 +177,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
       homeDir,
       getSkillWorkspaceOverride: (skillId) => db.getSkillWorkspace(skillId),
       getSkillEnvOverride: (skillId) => db.getSkillEnv(skillId),
+      getCommandEnvOverrides: (skillId) => db.getCommandEnvOverrides(skillId),
     });
     cachedDiscovery = {
       ...discovered,
@@ -336,6 +338,158 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           const refreshed = refreshSkills();
           return jsonResponse({
             skill: refreshed.skills.find((s) => s.id === skill.id),
+          });
+        }
+
+        // 4c. Save or Reset Per-Command Execution Environment: PUT /api/skills/:skillId/command-env
+        const cmdEnvMatch = pathname.match(/^\/api\/skills\/([^/]+)\/command-env$/);
+        if (cmdEnvMatch && req.method === "PUT") {
+          const skillId = decodeURIComponent(cmdEnvMatch[1]);
+          const { skills } = getSkillsState();
+          const skill = skills.find((s) => s.id === skillId);
+          if (!skill) return jsonResponse({ error: `Skill not found: ${skillId}` }, 404);
+
+          const body = (await req.json()) as {
+            targetKind: "action" | "data";
+            targetId: string;
+            envConfig: CommandEnvConfig | null;
+            saveToManifest?: boolean;
+            applyAsSkillDefault?: boolean;
+          };
+
+          let cleanedConfig: CommandEnvConfig | null = null;
+          if (body.envConfig && typeof body.envConfig === "object") {
+            const cwd = body.envConfig.cwd?.trim() || undefined;
+            const python = body.envConfig.python?.trim() || undefined;
+            const envFile = body.envConfig.envFile?.trim() || undefined;
+            const envMap: Record<string, string> = {};
+            for (const [k, v] of Object.entries(body.envConfig.env || {})) {
+              const cleanKey = k.trim();
+              if (cleanKey) envMap[cleanKey] = String(v ?? "");
+            }
+            const hasEnv = Object.keys(envMap).length > 0;
+            if (cwd || python || envFile || hasEnv) {
+              cleanedConfig = {
+                ...(cwd ? { cwd } : {}),
+                ...(python ? { python } : {}),
+                ...(envFile ? { envFile } : {}),
+                ...(hasEnv ? { env: envMap } : {}),
+              };
+            }
+          }
+
+          db.setCommandEnvOverride(skill.id, body.targetKind, body.targetId, cleanedConfig);
+
+          if (body.applyAsSkillDefault) {
+            if (cleanedConfig?.cwd) {
+              const rawSpec = cleanedConfig.cwd;
+              const resolvedDefault =
+                rawSpec === "project_root" || rawSpec === "."
+                  ? skill.effectiveWorkspace
+                  : rawSpec === "skill_dir"
+                    ? skill.canonicalPath
+                    : rawSpec.startsWith("~")
+                      ? expandHomePath(rawSpec, homeDir)
+                      : isAbsolute(rawSpec)
+                        ? resolve(rawSpec)
+                        : resolve(skill.effectiveWorkspace, rawSpec);
+              if (existsSync(resolvedDefault) && statSync(resolvedDefault).isDirectory()) {
+                db.setSkillWorkspace(skill.id, resolvedDefault);
+              }
+            }
+            if (cleanedConfig?.env && Object.keys(cleanedConfig.env).length > 0) {
+              const mergedSkillEnv = {
+                ...db.getSkillEnv(skill.id),
+                ...cleanedConfig.env,
+              };
+              db.setSkillEnv(skill.id, mergedSkillEnv);
+            }
+            reactiveEngine.invalidateSkill(skill.id);
+          }
+
+          if (body.saveToManifest) {
+            const provenance = skill.layers.provenance;
+            const relFile =
+              body.targetKind === "action"
+                ? provenance?.actionSource?.[body.targetId] || "manifest.yaml"
+                : provenance?.dataSource?.[body.targetId] || "manifest.yaml";
+            const dashboardRoot = resolve(skill.canonicalPath, ".dashboard");
+            const targetFile = resolve(dashboardRoot, relFile.replace(/^\/+/, ""));
+            if (targetFile.startsWith(dashboardRoot)) {
+              mkdirSync(dirname(targetFile), { recursive: true });
+              let docObj: any = existsSync(targetFile)
+                ? YAML.parse(readFileSync(targetFile, "utf-8")) || {}
+                : relFile === "manifest.yaml"
+                  ? JSON.parse(JSON.stringify(skill.manifest))
+                  : {};
+
+              if (body.applyAsSkillDefault && cleanedConfig?.cwd && relFile === "manifest.yaml" && docObj && typeof docObj === "object" && !Array.isArray(docObj)) {
+                docObj.defaultWorkspace = cleanedConfig.cwd;
+              }
+
+              const applyEnvFieldsToTarget = (item: any) => {
+                if (!item || typeof item !== "object") return;
+                if (cleanedConfig?.cwd) item.cwd = cleanedConfig.cwd;
+                else delete item.cwd;
+                if (cleanedConfig?.python) item.python = cleanedConfig.python;
+                else delete item.python;
+                if (cleanedConfig?.envFile) item.envFile = cleanedConfig.envFile;
+                else delete item.envFile;
+                if (cleanedConfig?.env && Object.keys(cleanedConfig.env).length > 0) {
+                  item.env = cleanedConfig.env;
+                } else {
+                  delete item.env;
+                }
+              };
+
+              if (Array.isArray(docObj)) {
+                const targetItem = docObj.find((n: any) => n && n.id === body.targetId);
+                if (targetItem) applyEnvFieldsToTarget(targetItem);
+              } else if (body.targetKind === "data" && Array.isArray(docObj.data)) {
+                const targetNode = docObj.data.find((n: any) => n && n.id === body.targetId);
+                if (targetNode) applyEnvFieldsToTarget(targetNode);
+              } else if (body.targetKind === "action") {
+                if (Array.isArray(docObj.actions)) {
+                  for (const act of docObj.actions) {
+                    if (act && act.id === body.targetId) applyEnvFieldsToTarget(act);
+                  }
+                }
+                if (Array.isArray(docObj.actionGroups)) {
+                  for (const grp of docObj.actionGroups) {
+                    for (const act of grp.actions || []) {
+                      if (act && act.id === body.targetId) applyEnvFieldsToTarget(act);
+                    }
+                    for (const sg of grp.subgroups || []) {
+                      for (const act of sg.actions || []) {
+                        if (act && act.id === body.targetId) applyEnvFieldsToTarget(act);
+                      }
+                    }
+                  }
+                }
+              }
+
+              writeFileSync(targetFile, YAML.stringify(docObj, { indent: 2 }), "utf-8");
+            }
+          }
+
+          const refreshed = refreshSkills();
+          const updatedSkill = refreshed.skills.find((s) => s.id === skill.id)!;
+
+          if (body.targetKind === "data") {
+            reactiveEngine.invalidateNodeAndDownstream(updatedSkill, body.targetId);
+            const snapshot = await reactiveEngine.evaluateNode({
+              skill: updatedSkill,
+              nodeId: body.targetId,
+              force: true,
+            });
+            return jsonResponse({
+              skill: updatedSkill,
+              snapshot,
+            });
+          }
+
+          return jsonResponse({
+            skill: updatedSkill,
           });
         }
 
@@ -859,6 +1013,17 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           }
 
           const sandbox = ensureUnitSandboxPaths(paths, skill.id);
+          const skillDefaultEnv: Record<string, string> = {};
+          for (const ev of skill.manifest.envVars || []) {
+            if (ev.default !== undefined) skillDefaultEnv[ev.key] = ev.default;
+          }
+          Object.assign(skillDefaultEnv, skill.configuredEnv);
+          const secretKeys = new Set(
+            (skill.manifest.envVars || []).filter((e) => e.secret).map((e) => e.key)
+          );
+          const uiEnvOverride = body.actionId
+            ? skill.commandEnvOverrides?.[`action:${body.actionId}`]
+            : undefined;
           const preview = interpolateActionCommand({
             action,
             skillDir: skill.canonicalPath,
@@ -869,11 +1034,15 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             formValues: body.formValues || {},
             contextValues: reactiveEngine.getContextState(skill),
             dataSnapshots: reactiveEngine.getSkillSnapshots(skill.id),
+            skillDefaultEnv,
+            secretKeys,
+            uiEnvOverride,
             previewOnly: true,
           });
           return jsonResponse({
             maskedCommand: preview.maskedCommand,
             cwd: preview.cwd,
+            resolvedEnv: preview.resolvedEnv,
             inferredForm: action.form || [],
             danger: action.danger,
             requiresHumanApprovalFlag: action.requiresHumanApprovalFlag,
@@ -885,9 +1054,17 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           const rawPrefix = url.searchParams.get("prefix") || "";
           const filterType = url.searchParams.get("type") || "all";
           const skillId = url.searchParams.get("skillId");
+          const cwdParam = url.searchParams.get("cwd") || "";
           const { skills } = getSkillsState();
           const skill = skillId ? skills.find((s) => s.id === skillId) : undefined;
-          const baseWorkspace = skill?.effectiveWorkspace || activeWorkspace;
+          const expandedCwdParam = cwdParam ? expandHomePath(cwdParam, homeDir) : "";
+          const validCustomCwd =
+            expandedCwdParam &&
+            existsSync(expandedCwdParam) &&
+            statSync(expandedCwdParam).isDirectory()
+              ? expandedCwdParam
+              : "";
+          const baseWorkspace = validCustomCwd || skill?.effectiveWorkspace || activeWorkspace;
 
           const expandedPrefix = rawPrefix.startsWith("~")
             ? join(homeDir, rawPrefix.slice(1))
@@ -908,6 +1085,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
 
           const allowedCompleteRoots = [
             baseWorkspace,
+             ...(validCustomCwd ? [validCustomCwd] : []),
             activeWorkspace,
             homeDir,
             ...skills.map((s) => s.canonicalPath),
@@ -1031,6 +1209,17 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           const sandbox = ensureUnitSandboxPaths(paths, skill.id, preRunId);
           const ctxState = reactiveEngine.getContextState(skill);
           const snapState = reactiveEngine.getSkillSnapshots(skill.id);
+          const skillDefaultEnv: Record<string, string> = {};
+          for (const ev of skill.manifest.envVars || []) {
+            if (ev.default !== undefined) skillDefaultEnv[ev.key] = ev.default;
+          }
+          Object.assign(skillDefaultEnv, skill.configuredEnv);
+          const secretKeys = new Set(
+            (skill.manifest.envVars || []).filter((e) => e.secret).map((e) => e.key)
+          );
+          const uiEnvOverride = action.id
+            ? skill.commandEnvOverrides?.[`action:${action.id}`]
+            : undefined;
 
           let interpolated;
           try {
@@ -1044,6 +1233,9 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
               formValues: body.formValues || {},
               contextValues: ctxState,
               dataSnapshots: snapState,
+              skillDefaultEnv,
+              secretKeys,
+              uiEnvOverride,
               humanApproved: Boolean(body.humanApproved),
               previewOnly: false,
             });
@@ -1055,7 +1247,6 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             SD_DATA_DIR: sandbox.unitDataDir,
             SD_CACHE_DIR: sandbox.unitCacheDir,
             SD_ARTIFACTS_DIR: sandbox.runArtifactsDir,
-            ...skill.configuredEnv,
             ...interpolated.env,
           };
 
@@ -1065,6 +1256,8 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
               command: interpolated.command,
               cwd: interpolated.cwd,
               terminalApp: body.terminalApp || "Terminal",
+              env: mergedEnv,
+              venvDir: interpolated.resolvedEnv?.venvDir ?? interpolated.venvDir,
             });
             return jsonResponse({
               mode: "external_terminal",
@@ -1111,6 +1304,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             command: interpolated.command,
             maskedCommand: interpolated.maskedCommand,
             cwd: interpolated.cwd,
+            venvDir: interpolated.venvDir,
             env: mergedEnv,
             maskedParams: interpolated.maskedParams,
             interactive: action.interactive,

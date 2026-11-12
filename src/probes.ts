@@ -13,13 +13,15 @@ import {
 import * as osModule from "os";
 import { tmpdir } from "os";
 import * as pathModule from "path";
-import { basename, dirname, extname, join, relative, resolve } from "path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import YAML from "yaml";
 import {
   extractImplicitDependencies,
+  resolveCommandEnvironment,
   resolveDataSnapshotPath,
   resolvePythonExecutable,
   shellEscape,
+  type ResolvedCommandEnvironment,
 } from "./interpolator.ts";
 import {
   ensureUnitSandboxPaths,
@@ -915,8 +917,9 @@ export class ReactiveGraphEngine {
       return { ...cached, fromCache: true };
     }
 
+    const nodeEnv = this.resolveNodeEnvironment(skill, node);
     const ctxState = this.getContextState(skill);
-    const flightKey = `${skill.id}:data:${node.id}:${skill.effectiveWorkspace}:${JSON.stringify(ctxState)}`;
+    const flightKey = `${skill.id}:data:${node.id}:${skill.effectiveWorkspace}:${JSON.stringify(ctxState)}:${JSON.stringify({ cwd: nodeEnv.cwd, py: nodeEnv.pythonRaw, env: nodeEnv.realEnv })}`;
     if (this.inFlight.has(flightKey)) {
       return this.inFlight.get(flightKey)!;
     }
@@ -972,6 +975,18 @@ export class ReactiveGraphEngine {
           intermediate: Boolean(node.intermediate || (node as any).hidden),
           rawParsed: structuredData,
           consumedBy: this.getReverseConsumers(skill, node.id),
+          resolvedEnv: {
+            cwd: nodeEnv.cwd,
+            python: nodeEnv.python,
+            venvDir: nodeEnv.venvDir,
+            envFile: nodeEnv.envFile,
+            customEnvKeys: nodeEnv.customEnvKeys,
+            effectiveEnv: nodeEnv.effectiveEnv,
+            rawOverride: nodeEnv.rawOverride,
+            isCustom: nodeEnv.isCustom,
+            hasUiOverride: nodeEnv.hasUiOverride,
+            badgeText: nodeEnv.badgeText,
+          },
           shape: node.shape || "raw",
           runtime: node.runtime || "zsh",
           status: execOut.exitCode === 0 ? "ready" : "error",
@@ -1008,6 +1023,18 @@ export class ReactiveGraphEngine {
           intermediate: Boolean(node.intermediate || (node as any).hidden),
           rawParsed: undefined,
           consumedBy: this.getReverseConsumers(skill, node.id),
+          resolvedEnv: {
+            cwd: nodeEnv.cwd,
+            python: nodeEnv.python,
+            venvDir: nodeEnv.venvDir,
+            envFile: nodeEnv.envFile,
+            customEnvKeys: nodeEnv.customEnvKeys,
+            effectiveEnv: nodeEnv.effectiveEnv,
+            rawOverride: nodeEnv.rawOverride,
+            isCustom: nodeEnv.isCustom,
+            hasUiOverride: nodeEnv.hasUiOverride,
+            badgeText: nodeEnv.badgeText,
+          },
           shape: node.shape || "raw",
           runtime: node.runtime || "zsh",
           status: "error",
@@ -1053,15 +1080,48 @@ export class ReactiveGraphEngine {
     return this.getSkillSnapshots(skill.id);
   }
 
+  public resolveNodeEnvironment(skill: CanonicalSkill, node: DataNode): ResolvedCommandEnvironment {
+    const skillDefaultEnv: Record<string, string> = {};
+    for (const ev of skill.manifest.envVars || []) {
+      if (ev.default !== undefined) skillDefaultEnv[ev.key] = ev.default;
+    }
+    Object.assign(skillDefaultEnv, skill.configuredEnv);
+    const secretKeys = new Set((skill.manifest.envVars || []).filter((e) => e.secret).map((e) => e.key));
+    const uiOverride = skill.commandEnvOverrides?.[`data:${node.id}`];
+
+    return resolveCommandEnvironment({
+      skillDir: skill.canonicalPath,
+      defaultWorkspace: skill.effectiveWorkspace,
+      skillDefaultEnv,
+      secretKeys,
+      yamlConfig: {
+        cwd: node.cwd,
+        python: node.python,
+        envFile: node.envFile,
+        env: node.env,
+      },
+      uiOverride,
+      interpolateToken: (raw) => this.interpolateText(skill, raw, false),
+    });
+  }
+
   private resolveCwd(skill: CanonicalSkill, cwdSpec?: string): string {
     if (!cwdSpec || cwdSpec === "project_root" || cwdSpec === ".") return skill.effectiveWorkspace;
     if (cwdSpec === "skill_dir") return skill.canonicalPath;
     return resolve(skill.effectiveWorkspace, cwdSpec);
   }
 
-  public interpolateText(skill: CanonicalSkill, rawText: string, escapeTokens = false): string {
+  public interpolateText(
+    skill: CanonicalSkill,
+    rawText: string,
+    escapeTokens = false,
+    nodeEnv?: ResolvedCommandEnvironment
+  ): string {
     if (!rawText) return "";
-    const py = resolvePythonExecutable(skill.effectiveWorkspace);
+    const py = nodeEnv
+      ? (escapeTokens ? nodeEnv.pythonEscaped : nodeEnv.pythonRaw)
+      : resolvePythonExecutable(skill.effectiveWorkspace);
+    const projectRoot = nodeEnv ? nodeEnv.cwd : skill.effectiveWorkspace;
     const ctxState = this.getContextState(skill);
     const snaps = this.getSkillSnapshots(skill.id);
     const sandbox = ensureUnitSandboxPaths(this.paths, skill.id);
@@ -1084,7 +1144,11 @@ export class ReactiveGraphEngine {
       });
   }
 
-  private buildExecutionContext(skill: CanonicalSkill, extra: Record<string, any> = {}) {
+  private buildExecutionContext(
+    skill: CanonicalSkill,
+    extra: Record<string, any> = {},
+    nodeEnv?: ResolvedCommandEnvironment
+  ) {
     const snaps = this.getSkillSnapshots(skill.id);
     const sandbox = ensureUnitSandboxPaths(this.paths, skill.id);
     const dataValues: Record<string, any> = {};
@@ -1106,14 +1170,17 @@ export class ReactiveGraphEngine {
         dataValues[k] = s.value;
       }
     }
+    const cwd = nodeEnv ? nodeEnv.cwd : skill.effectiveWorkspace;
+    const python = nodeEnv ? nodeEnv.pythonRaw : resolvePythonExecutable(skill.effectiveWorkspace);
     return {
       skillId: skill.id,
       skillDir: skill.canonicalPath,
       workspace: skill.effectiveWorkspace,
+      cwd,
       dataDir: sandbox.unitDataDir,
       cacheDir: sandbox.unitCacheDir,
       artifactsDir: sandbox.latestArtifactsLink,
-      python: resolvePythonExecutable(skill.effectiveWorkspace),
+      python,
       context: this.getContextState(skill),
       data: dataValues,
       nodes: snaps,
@@ -1122,6 +1189,7 @@ export class ReactiveGraphEngine {
         SD_CACHE_DIR: sandbox.unitCacheDir,
         SD_ARTIFACTS_DIR: sandbox.latestArtifactsLink,
         ...skill.configuredEnv,
+        ...(nodeEnv ? nodeEnv.realEnv : {}),
       },
       ...extra,
     };
@@ -1138,8 +1206,15 @@ export class ReactiveGraphEngine {
     timedOut: boolean;
   }> {
     const runtime = node.runtime || "zsh";
-    const cwd = this.resolveCwd(skill, node.cwd);
+    const nodeEnv = this.resolveNodeEnvironment(skill, node);
+    const cwd = nodeEnv.cwd;
     const timeoutMs = node.timeoutMs || 15000;
+    const sandbox = ensureUnitSandboxPaths(this.paths, skill.id);
+    const sandboxEnv = {
+      SD_DATA_DIR: sandbox.unitDataDir,
+      SD_CACHE_DIR: sandbox.unitCacheDir,
+      SD_ARTIFACTS_DIR: sandbox.latestArtifactsLink,
+    };
 
     if (runtime === "passive") {
       const existing = this.snapshots.get(skill.id)?.get(node.id);
@@ -1163,9 +1238,14 @@ export class ReactiveGraphEngine {
       const seen = new Set<string>();
 
       for (const rawPat of rawPatterns) {
-        const expanded = this.interpolateText(skill, rawPat, false);
-        const dirPath = dirname(expanded);
-        const fileGlob = basename(expanded);
+        const expanded = this.interpolateText(skill, rawPat, false, nodeEnv);
+        const resolvedPath = expanded.startsWith("~/")
+          ? join(osModule.homedir(), expanded.slice(2))
+          : isAbsolute(expanded)
+            ? expanded
+            : resolve(cwd, expanded);
+        const dirPath = dirname(resolvedPath);
+        const fileGlob = basename(resolvedPath);
         if (!existsSync(dirPath) || !statSync(dirPath).isDirectory()) continue;
 
         const rxStr =
@@ -1191,7 +1271,7 @@ export class ReactiveGraphEngine {
             valueFormat === "abspath"
               ? full
               : valueFormat === "relative"
-                ? relative(skill.effectiveWorkspace, full)
+                ? relative(cwd, full)
                 : entry;
           if (seen.has(val)) continue;
           seen.add(val);
@@ -1203,7 +1283,7 @@ export class ReactiveGraphEngine {
             name: entry,
             value: val,
             path: full,
-            relPath: relative(skill.effectiveWorkspace, full),
+            relPath: relative(cwd, full),
             size: st.size,
             sizeFormatted,
             updatedAt: new Date(st.mtimeMs).toISOString().replace("T", " ").slice(0, 19),
@@ -1215,11 +1295,11 @@ export class ReactiveGraphEngine {
     }
 
     if (runtime === "file") {
-      const rawExpanded = this.interpolateText(skill, node.filePath || "", false);
+      const rawExpanded = this.interpolateText(skill, node.filePath || "", false, nodeEnv);
       const expandedPath = rawExpanded.startsWith("~/")
         ? join(osModule.homedir(), rawExpanded.slice(2))
         : rawExpanded;
-      const target = existsSync(expandedPath) ? expandedPath : resolve(cwd, expandedPath);
+      const target = isAbsolute(expandedPath) ? expandedPath : resolve(cwd, expandedPath);
       if (!existsSync(target) || !statSync(target).isFile()) {
         return { stdout: "", stderr: `File not found: ${expandedPath}`, exitCode: 1, timedOut: false };
       }
@@ -1241,15 +1321,15 @@ export class ReactiveGraphEngine {
     }
 
     if (runtime === "sqlite") {
-      const rawDb = this.interpolateText(skill, node.db || "", false);
+      const rawDb = this.interpolateText(skill, node.db || "", false, nodeEnv);
       const dbRaw = rawDb.startsWith("~/")
         ? join(osModule.homedir(), rawDb.slice(2))
         : rawDb;
-      const dbPath = existsSync(dbRaw) ? dbRaw : resolve(cwd, dbRaw);
+      const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(cwd, dbRaw);
       if (!existsSync(dbPath)) {
         return { stdout: "", stderr: `SQLite DB not found: ${dbRaw}`, exitCode: 1, timedOut: false };
       }
-      const sqlText = this.interpolateText(skill, node.sql || "", false);
+      const sqlText = this.interpolateText(skill, node.sql || "", false, nodeEnv);
       const sqldb = new Database(dbPath, { readonly: true });
       try {
         const ctxState = this.getContextState(skill);
@@ -1274,10 +1354,10 @@ export class ReactiveGraphEngine {
       const rawCode = node.code
         ? node.code
         : node.entry
-          ? readFileSync(resolve(cwd, this.interpolateText(skill, node.entry, false)), "utf-8")
+          ? readFileSync(resolve(cwd, this.interpolateText(skill, node.entry, false, nodeEnv)), "utf-8")
           : "";
-      const interpolatedCode = this.interpolateText(skill, rawCode, false);
-      const ctxObj = this.buildExecutionContext(skill);
+      const interpolatedCode = this.interpolateText(skill, rawCode, false, nodeEnv);
+      const ctxObj = this.buildExecutionContext(skill, {}, nodeEnv);
       const effectivePrelude = node.prelude ?? skill.manifest.tsPrelude ?? false;
       const res = await executeInlineTypeScript({
         code: interpolatedCode,
@@ -1294,36 +1374,34 @@ export class ReactiveGraphEngine {
     }
 
     if (runtime === "python") {
-      const pyBin = resolvePythonExecutable(skill.effectiveWorkspace).replace(/^'|'$/g, "");
       const rawCode = node.code
         ? node.code
         : node.entry
-          ? readFileSync(resolve(cwd, this.interpolateText(skill, node.entry, false)), "utf-8")
+          ? readFileSync(resolve(cwd, this.interpolateText(skill, node.entry, false, nodeEnv)), "utf-8")
           : "";
-      const interpolatedCode = this.interpolateText(skill, rawCode, false);
-      const ctxObj = this.buildExecutionContext(skill);
+      const interpolatedCode = this.interpolateText(skill, rawCode, false, nodeEnv);
+      const ctxObj = this.buildExecutionContext(skill, {}, nodeEnv);
       return this.execPythonStructured({
-        pythonBin: pyBin,
+        pythonBin: nodeEnv.pythonRaw,
         code: interpolatedCode,
         ctxObj,
-        cwd,
-        env: skill.configuredEnv,
+        cwd: nodeEnv.cwd,
+        venvDir: nodeEnv.venvDir,
+        env: { ...sandboxEnv, ...nodeEnv.realEnv },
         timeoutMs,
       });
     }
 
     // Default runtime === "zsh"
     const rawCmd = node.script || node.command || "";
-    const command = this.interpolateText(skill, rawCmd, true);
-    const sandbox = ensureUnitSandboxPaths(this.paths, skill.id);
+    const command = this.interpolateText(skill, rawCmd, true, nodeEnv);
     return this.execFastShell({
       command,
-      cwd,
+      cwd: nodeEnv.cwd,
+      venvDir: nodeEnv.venvDir,
       env: {
-        SD_DATA_DIR: sandbox.unitDataDir,
-        SD_CACHE_DIR: sandbox.unitCacheDir,
-        SD_ARTIFACTS_DIR: sandbox.latestArtifactsLink,
-        ...skill.configuredEnv,
+        ...sandboxEnv,
+        ...nodeEnv.realEnv,
       },
       timeoutMs,
     });
@@ -1362,6 +1440,7 @@ export class ReactiveGraphEngine {
     code: string;
     ctxObj: Record<string, any>;
     cwd: string;
+    venvDir?: string | null;
     env?: Record<string, string>;
     timeoutMs: number;
   }): Promise<{
@@ -1390,6 +1469,7 @@ if 'main' in globals() and callable(globals()['main']):
     print(json.dumps(_sd_res, default=str))
     print("__SD_JSON_END__")
 `;
+      const basePath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
       const proc = Bun.spawn([params.pythonBin, "-c", wrapper], {
         cwd: params.cwd,
         env: {
@@ -1398,6 +1478,12 @@ if 'main' in globals() and callable(globals()['main']):
           LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
           PYTHONUNBUFFERED: "1",
           SD_CTX_FILE: ctxFilePath,
+          ...(params.venvDir
+            ? {
+                VIRTUAL_ENV: params.venvDir,
+                PATH: `${params.venvDir}/bin:${basePath}`,
+              }
+            : {}),
           ...(params.env || {}),
         },
         stdout: "pipe",
@@ -1456,6 +1542,7 @@ if 'main' in globals() and callable(globals()['main']):
   private async execFastShell(params: {
     command: string;
     cwd: string;
+    venvDir?: string | null;
     env?: Record<string, string>;
     timeoutMs: number;
   }): Promise<{
@@ -1468,6 +1555,7 @@ if 'main' in globals() and callable(globals()['main']):
     await this.acquireProcessSlot();
     try {
       const t0 = performance.now();
+      const basePath = process.env.PATH || "/usr/local/bin:/usr/bin:/bin";
       const proc = Bun.spawn(["/bin/zsh", "-c", params.command], {
         cwd: params.cwd,
         env: {
@@ -1475,6 +1563,12 @@ if 'main' in globals() and callable(globals()['main']):
           LANG: process.env.LANG || "en_US.UTF-8",
           LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
           PYTHONUNBUFFERED: "1",
+          ...(params.venvDir
+            ? {
+                VIRTUAL_ENV: params.venvDir,
+                PATH: `${params.venvDir}/bin:${basePath}`,
+              }
+            : {}),
           ...(params.env || {}),
         },
         stdout: "pipe",

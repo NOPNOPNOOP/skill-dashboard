@@ -26,6 +26,7 @@ category: "Data & Platform" # Data & Platform | Quality & Review | Knowledge & D
 description: "Unified operations console and architecture hub for VSIP."
 icon: ".dashboard/assets/icon.svg"     # Optional relative SVG/PNG icon
 banner: ".dashboard/assets/banner.png" # Optional relative banner image
+# Default environment preference for the skill (commands inherit unless overridden via ⚙️ Env or per-command fields)
 defaultWorkspace: "~/Projects/vsip-backend"
 tsPrelude: true                        # Optional default prelude: true for all runtime: ts / transform: ts blocks
 defaultPrompt: "/vsip "
@@ -49,7 +50,7 @@ defs:
       - { label: "UAT", value: "uat" }
       - { label: "PROD", value: "prod" }
 
-# Per-unit configurable environment variables (injected into all PTY runs and shells)
+# Per-unit default environment variables preference (injected into runs and shells unless overridden per-command)
 envVars:
   - key: TYPESAFE_API_KEY
     label: "TypeSafe API Key"
@@ -85,6 +86,9 @@ actionGroups: [] # Detailed below
 | `interactive` | `boolean` | `false` | Set `true` for full-screen keyboard TUIs (`prompt_toolkit`, `fzf`, `htop`, `vim`) so the Web PTY drawer automatically expands and focuses keyboard input. |
 | `defaultRunner` | `"web_terminal" \| "external_terminal" \| "copy_command" \| "copy_agent_prompt"` | `"web_terminal"` | Default execution surface. |
 | `cwd` | `"project_root" \| "skill_dir" \| string` | `"project_root"` | Working directory for the process (`project_root` resolves to `effectiveWorkspace`; `skill_dir` resolves to the unit's canonical folder). |
+| `python` | `string` | Optional | Custom Python interpreter path or auto-detect expression. Defaults to auto-detecting nearest `.venv/bin/python` from command's own `cwd`. |
+| `envFile` | `string` | Optional | Path to optional `.env` file relative to command's `cwd` (e.g. `.env.uat`). |
+| `env` | `Record<string, string>` | Optional | Command-specific environment variables overriding skill defaults. |
 | `command` | `string` | Required* | Single-line or multi-line command template (*or use `script: \|`). |
 | `script` | `string` | Optional | Multi-line shell script executed in an isolated temporary `/bin/zsh` file with `set -e` enabled. |
 | `form` | `FormField[]` | `[]` | Typed parameter inputs rendered in the Action Card. |
@@ -99,7 +103,7 @@ All `command`, `script`, `DataNode.command`, and `ArtifactRule.path` strings sup
 
 | Variable | Environment Variable Equivalent | Resolves To |
 | :--- | :--- | :--- |
-| `{{python}}` | — | `<effectiveWorkspace>/.venv/bin/python` (walking up to 4 parent dirs), or `python3`. |
+| `{{python}}` | — | Nearest `.venv/bin/python` detected from the command's own resolved `cwd` first (walking up to 4 parent dirs), falling back to `<effectiveWorkspace>/.venv/bin/python` or `python3`. |
 | `{{skill_dir}}` | `$SKILL_DIR` | Canonical physical directory of the unit (e.g. `~/.agents/skills/vsip`). |
 | `{{project_root}}` | — | Bound `effectiveWorkspace` directory. |
 | `{{data_dir}}` | `$SD_DATA_DIR` | `~/.local/share/skill-dashboard/units/<unit_id>` — persistent per-unit storage for backups, SQLite DBs, and state files. |
@@ -199,3 +203,46 @@ Any script can emit lines matching:
 
 ### Channel 3: Automatic `{{artifacts_dir}}` (`$SD_ARTIFACTS_DIR`) Directory Scan
 Any file written into `$SD_ARTIFACTS_DIR` during the run is automatically discovered and surfaced as a clickable badge in the Terminal Drawer!
+
+---
+
+## 8. Per-Command Execution Environment & Default Workspace Preference Inheritance
+
+Skill Dashboard implements a clear two-tier separation between **Skill Default Preferences** and **Per-Command Execution Environments**:
+
+### 8.1 Default Environment Preference vs Per-Command Overrides
+- **Skill Default Preference**:
+  - `defaultWorkspace`: Sets the fallback working directory (`Default cwd:`) for the entire skill.
+  - `envVars`: Configures default environment variables (`Default Env (N)`) accessible across operations.
+- **Per-Command Overrides**:
+  - Both `ActionItem` and `DataNode` support independent environment properties:
+    ```yaml
+    actions:
+      - id: run-uat-sync
+        title: "Sync UAT Database"
+        cwd: "~/Projects/uat-service"
+        python: ".venv/bin/python"
+        envFile: ".env.uat"
+        env:
+          SERVICE_STAGE: "uat"
+          DEBUG: "1"
+        command: "{{python}} scripts/sync.py"
+    ```
+  - When a command does not specify `cwd`, it inherits the skill's `defaultWorkspace`.
+  - When `python` is omitted or set to auto, the engine searches for `.venv/bin/python` starting from the command's own resolved `cwd` first (walking upward), ensuring multi-repo or subfolder environments are automatically picked up before falling back to the skill's default workspace.
+  - When `envFile` is specified, dotenv variables are loaded relative to the command's resolved `cwd`.
+  - Command-level `env` key-values merge on top of the skill's configured `envVars` and process environment.
+
+### 8.2 Interactive `⚙️ Env` Studio UI Control
+- Every `ActionCard` and `DataNode` card in the Web UI features a compact **`⚙️ Env`** button.
+- When inheriting default workspace and environment preferences:
+  - Displays a subtle `⚙️ Env` button with a tooltip showing resolved `cwd` and `python`.
+- When custom environment settings are active:
+  - Displays a highlighted `⚙️ Custom Env` (or `⚙️ ${badgeText}`) badge.
+- Clicking the button expands the inline `CommandEnvEditor`:
+  - **Working Directory (`cwd`)**: Input with quick-fill chips (`project_root`, `skill_dir`) and live directory autocomplete via `/api/fs/complete`.
+  - **Python / Runtime (`{{python}}`)**: Shows auto-detected `.venv/bin/python` status and allows custom runtime overrides.
+  - **Dotenv File (`envFile`)**: Relative dotenv path input.
+  - **Command-Specific Variables (`env`)**: Key-value editor with add/remove controls.
+  - **Save Options**: Checkbox to save to `manifest.yaml`, checkbox to promote `cwd` as the Skill Default Preference, and buttons to Apply or Reset to Default.
+

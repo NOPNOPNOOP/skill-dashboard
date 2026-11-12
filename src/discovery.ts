@@ -23,6 +23,7 @@ import type {
   AgentMount,
   AgentMountRoot,
   CanonicalSkill,
+  CommandEnvConfig,
   FileTreeNode,
   LockProvenance,
   ManagedFolderEntry,
@@ -193,6 +194,7 @@ export function discoverCanonicalSkills(options: {
   homeDir: string;
   getSkillWorkspaceOverride?: (skillId: string) => string | null;
   getSkillEnvOverride?: (skillId: string) => Record<string, string>;
+  getCommandEnvOverrides?: (skillId: string) => Record<string, CommandEnvConfig>;
 }): {
   skills: CanonicalSkill[];
   brokenMounts: AgentMount[];
@@ -315,6 +317,7 @@ export function discoverCanonicalSkills(options: {
           effectiveWorkspace,
           pythonExecutable: resolvePythonExecutable(effectiveWorkspace),
           configuredEnv,
+          commandEnvOverrides: options.getCommandEnvOverrides ? options.getCommandEnvOverrides(id) : {},
           mounts: [],
           provenance,
           hasOpenAiYaml: existsSync(join(realPath, "agents/openai.yaml")),
@@ -460,6 +463,7 @@ export function discoverCanonicalSkills(options: {
       effectiveWorkspace,
       pythonExecutable: resolvePythonExecutable(effectiveWorkspace),
       configuredEnv,
+      commandEnvOverrides: options.getCommandEnvOverrides ? options.getCommandEnvOverrides(id) : {},
       mounts: [],
       hasOpenAiYaml: existsSync(join(realPath, "agents/openai.yaml")),
       layers,

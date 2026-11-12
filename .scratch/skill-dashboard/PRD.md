@@ -141,6 +141,8 @@ Build **Skill Dashboard Studio** (`skill-dashboard`)—a fast, zero-external-dep
 71. As a skill author whose skill needs multiple UI cards (e.g., a `kv` summary card and a `table` detail card) derived from a single expensive CLI / database query without unsafe implicit shell command merging, I want to declare explicit **`intermediate: true`** upstream `DataNode`s (alongside optional **`category: "<group>"`** tags on `DataNode`s) and have downstream `runtime: ts` nodes subscribe via `sync.dependsOn` and read `ctx.data["<upstream_id>"]` (exposing `rawParsed` structured output), while providing a **`🔬 Intermediates (N)`** toggle switch and category filter pills in the Data Panel so I can inspect intermediate DAG payloads and their reverse-dependents (`Referenced by: ...`) on demand.
 72. As a developer loading or refreshing a complex skill like `vsip` with 10+ `DataNode`s, I want `evaluateAllSkillData` to evaluate the DAG concurrently (using node-level Single-Flight locks and a process concurrency semaphore rather than serial awaiting), `Bun.serve` to configure `idleTimeout: 60` so multi-second Python/DB queries are never killed at 10s, `executeInlineTypeScript` to inject `{ input, rawStdout, context, data, nodes }` into the `ts` scope, and the frontend `StatusProbesBar` to stream-load each visible `DataNode` independently with explicit error cards and `↻ Retry` buttons.
 73. As a user clicking the top-right **Refresh** button in the Studio header, I want visible spinning feedback (`animate-spin`) and a full end-to-end refresh that simultaneously rescans disk manifests (`/api/bootstrap?refresh=1`), invalidates and re-evaluates all active `DataNode`s and `FormField.fromData` options (`refreshTrigger++`), and reloads the active `Manifest Studio` module file.
+74. As a skill author or developer operating multi-repository or multi-environment workflows, I want the skill-level `workspace` (`defaultWorkspace` / header `Default cwd`) and `envVars` (`Default Env`) to act strictly as an inheritable **Default Environment Preference**, while every individual `ActionItem` and `DataNode` can declare its own independent **Command-Level Execution Environment** (`cwd`, `python`, `envFile`, and `env` key-values supporting `~`, `skill_dir`, `project_root`, `{{context.*}}`, and `{{form.*}}`), with `{{python}}`, `VIRTUAL_ENV`, and `PATH` automatically detected from that command's own resolved `cwd` (`resolveCommandEnvironment`) before falling back to the skill's default workspace preference.
+75. As a user in the Studio UI, I want **every `ActionItem` card and every `DataNode` card** to include a compact **`⚙️ Env`** button (displaying `⚙️ Env` when inheriting the skill's default preference, or a highlighted `⚙️ Custom Env` badge when overridden in YAML or UI) that expands an inline **Command Execution Environment** configuration panel (`cwd` with local folder autocomplete, `python` runtime path with live auto-detected `.venv/bin/python` preview, `envFile` dotenv path, and per-command `env` key-value overrides), with actions to **Apply** (persisting to SQLite `cmd_env:<skillId>:action|data:<id>`), optionally **Write to Manifest** (via `SymbolProvenance`), **Reset to Default**, or **Apply as Skill Default**, immediately updating live command previews, `/api/fs/complete` roots, and cascading `DataNode` DAG evaluations.
 
 ---
 
@@ -263,6 +265,13 @@ export interface ContextField {
   fromData?: string;
 }
 
+export interface CommandEnvConfig {
+  cwd?: "project_root" | "skill_dir" | string; // supports ~, absolute, relative, {{context.*}}, {{form.*}}
+  python?: string;                             // optional explicit python binary; defaults to nearest .venv/bin/python from resolved cwd
+  envFile?: string;                            // optional dotenv file path relative to resolved cwd (e.g. ".env.uat")
+  env?: Record<string, string>;                // per-command environment variable overrides
+}
+
 export interface DataNode {
   id: string;
   title: string;
@@ -282,6 +291,9 @@ export interface DataNode {
   valueFormat?: "basename" | "relative" | "abspath";
   filePath?: string;
   cwd?: "project_root" | "skill_dir" | string;
+  python?: string;
+  envFile?: string;
+  env?: Record<string, string>;
   timeoutMs?: number;
   parse?: {
     format: "auto" | "json" | "jsonl" | "csv" | "tsv" | "whitespace-table" | "regex" | "kv" | "lines" | "raw";
@@ -330,6 +342,9 @@ export interface ActionItem {
   interactive?: boolean;              // true for full-screen TUIs (prompt_toolkit, etc.)
   defaultRunner: "web_terminal" | "external_terminal" | "copy_command" | "copy_agent_prompt";
   cwd?: "project_root" | "skill_dir" | string;
+  python?: string;
+  envFile?: string;
+  env?: Record<string, string>;
   command: string;                    // template supporting {{python}}, {{skill_dir}}, {{project_root}}, {{data_dir}}, {{cache_dir}}, {{artifacts_dir}}, {{context.*}}, {{data.*}}, {{form.*}}
   script?: string;                    // multi-line isolated script (`#!/bin/zsh\nset -e`)
   form?: FormField[];
@@ -448,7 +463,8 @@ export interface AgentManifestSyncRequest {
 ### 4. REST API, Bridge 2.0 & WebSocket Protocol Contract
 - `GET /api/bootstrap`: Returns `{ skills: CanonicalSkill[], brokenMounts: AgentMount[], activeWorkspace: string, pythonExecutable: string, recentWorkspaces: string[], agentTargets: AgentTargetInfo[], runs: ExecutionRun[] }`.
 - `POST /api/workspace`: Sets `{ activeWorkspace: string, skillId?: string, saveToManifest?: boolean }` and re-evaluates workspace overrides and `{{python}}` resolution.
-- `PUT /api/skills/:skillId/env`: Persists per-skill environment variables (`Record<string, string>`).
+- `PUT /api/skills/:skillId/env`: Persists per-skill default environment variables (`Record<string, string>`).
+- `PUT /api/skills/:skillId/command-env`: `{ targetKind: "action" | "data", targetId: string, envConfig: CommandEnvConfig | null, saveToManifest?: boolean, applyAsSkillDefault?: boolean }` — persists or clears a per-command execution environment override in SQLite (`cmd_env:<skillId>:<targetKind>:<targetId>`), optionally writes `cwd`/`python`/`envFile`/`env` back to the defining manifest module file via `SymbolProvenance`, or promotes `cwd` to the skill's default workspace preference; when `targetKind === "data"`, automatically invalidates the target `DataNode` and its downstream DAG dependents.
 - `POST /api/mounts/toggle`: `{ skillId: string, agent: AgentEcosystem, enabled: boolean }` — creates clean relative symlinks (`../../.agents/skills/<id>`) or removes symlinks.
 - `POST /api/mounts/repair`: `{ mountPath: string, action: "relink" | "remove", targetSkillId?: string }` — repairs or removes a broken symlink.
 - `GET /api/skills/:skillId/files?path=<relPath>&mode=list|read&recursive=1`: Returns hierarchical directory entries or file content/metadata inside the skill's canonical directory.
@@ -505,6 +521,9 @@ export interface AgentManifestSyncRequest {
 10. **Explicit Intermediate DAG DataNodes (`intermediate: true`), Category Grouping, Concurrent DAG Evaluation & Top-Level Refresh**:
    - Verifies `DataNode`s with `intermediate: true` and `category` execute their upstream command exactly once when multiple downstream `runtime: ts` nodes (`dependsOn: ["<upstream_id>"]`) evaluate concurrently, exposing `rawParsed` via `ctx.data["<upstream_id>"]` and top-level `{ input, rawStdout, data, context, nodes }` in `executeInlineTypeScript`.
    - Verifies `evaluateAllSkillData` runs DAG nodes concurrently without serial 10-second timeouts, and verifies `vsip`'s refactored intermediate DAG nodes pass `manifest-cli validate vsip`.
+11. **Per-Command Execution Environment (`cwd` + `python` + `envFile` + `env`) & Default Workspace Preference Inheritance**:
+   - Verifies that skill-level `workspace` and `envVars` act as default preferences inherited by `DataNode`s and `ActionItem`s, while any individual `DataNode` or `ActionItem` can override `cwd`, `python`, `envFile`, and `env` either declaratively in `manifest.yaml` or dynamically via `PUT /api/skills/:id/command-env`.
+   - Verifies that `resolveCommandEnvironment` resolves `{{python}}`, `VIRTUAL_ENV`, and `PATH` from the command's own `cwd` `.venv/bin/python` first (falling back to the skill's default workspace `.venv/bin/python` and `python3`), loads `.env` files (`envFile`), masks secrets in command previews and `DataSnapshot.resolvedEnv`, cascades DAG invalidation when a `DataNode`'s environment changes, and roots `/api/fs/complete` at the command's resolved `cwd`.
 
 ---
 

@@ -80,19 +80,19 @@ bunx --bun manifest-cli folder remove <dir_path>
 | `name` | `string` | Yes | Human-readable display title in the Studio UI. |
 | `category` | `string` | Yes | `Data & Platform` \| `Quality & Review` \| `Knowledge & Docs` \| `Agent & Automation` \| `Design & Visualization` \| `Engineering Tools`. |
 | `description` | `string` | Yes | Concise 1–2 sentence summary. |
-| `defaultWorkspace` | `string` | No | Default `cwd` (`{{project_root}}` and `<defaultWorkspace>/.venv/bin/python` for `{{python}}`). |
+| `defaultWorkspace` | `string` | No | Default environment preference (`Default cwd:`). Commands inherit this unless overridden via per-command `cwd` or UI `⚙️ Env`. |
 | `tsPrelude` | `boolean` | No | Default `prelude: true` for all TypeScript `data` nodes and `transform`s. |
 | `includes` / `defs` | `string[]` / `object` | No | Explicit modular YAML includes and reusable `$ref: "#/defs/<key>"` definitions. |
-| `envVars` | `SkillEnvVar[]` | No | Per-unit configurable environment variables (`key`, `label`, `default`, `secret`, `description`). |
+| `envVars` | `SkillEnvVar[]` | No | Default environment variables preference (`Default Env (N)`), injected into commands unless overridden. |
 | `context` | `ContextField[]` | No | Global reactive state switchers (`select`, `toggle`, `text`) rendered in the top toolbar (`{{context.<key>}}`). |
-| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) producing `scalar`, `kv`, `list`, `table`, `matrix`, `stream`, or `raw` widgets. Supports `category` tabs and `intermediate: true` upstream DAG source nodes. |
+| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) producing `scalar`, `kv`, `list`, `table`, `matrix`, `stream`, or `raw` widgets. Supports `category` tabs, `intermediate: true` upstream DAG source nodes, and per-node `cwd`/`python`/`envFile`/`env`. |
 | `views` | `SkillView[]` | No | Markdown docs (`type: markdown`) and Custom HTML App Views (`type: html` with `window.SkillDashboard` Bridge 2.0). |
-| `actionGroups` | `ActionGroup[]` | No | Hierarchical operational groups (`Group` $\rightarrow$ `subgroup` $\rightarrow$ `ActionItem`). |
+| `actionGroups` | `ActionGroup[]` | No | Hierarchical operational groups (`Group` $\rightarrow$ `subgroup` $\rightarrow$ `ActionItem`). Supports per-action `cwd`/`python`/`envFile`/`env`. |
 
 ### 3.2 Template Variables & Flag Auto-Binding
-- **`{{python}}`**: Resolves to `<effectiveWorkspace>/.venv/bin/python` or `python3`.
+- **`{{python}}`**: Auto-detects nearest `.venv/bin/python` from the command's own resolved `cwd` first (walking up to 4 parent dirs), before falling back to `<effectiveWorkspace>/.venv/bin/python` or `python3`.
 - **`{{skill_dir}}`**: Canonical absolute path of the unit directory.
-- **`{{project_root}}`**: Bound `effectiveWorkspace`.
+- **`{{project_root}}`**: Bound `effectiveWorkspace` (skill default preference).
 - **`{{data_dir}}`** (`$SD_DATA_DIR`), **`{{cache_dir}}`** (`$SD_CACHE_DIR`), **`{{artifacts_dir}}`** (`$SD_ARTIFACTS_DIR`).
 - **`{{context.<key>}}`** & **`{{data.<nodeId>.*}}`**.
 - **`{{form.<key>}}`**:
@@ -110,7 +110,17 @@ bunx --bun manifest-cli folder remove <dir_path>
 2. **Channel 2 (`::artifact` Stdout Marker)**: `::artifact path=/path/to/file.html label="Report" onComplete=open`.
 3. **Channel 3 (`{{artifacts_dir}}` Directory Scan)**: Automatic collection of all files written to `$SD_ARTIFACTS_DIR`.
 
----
+### 3.5 Per-Command Execution Environment & Default Workspace Preference Inheritance
+- **Skill Default Preference**: Root `defaultWorkspace` and `envVars` establish the default workspace (`Default cwd:`) and environment variables (`Default Env`) for the skill.
+- **Command-Level Overrides**: Every `ActionItem` and `DataNode` can declare its own execution environment:
+  - `cwd`: Independent working directory (`"project_root"` \| `"skill_dir"` \| custom path with `~` / relative paths).
+  - `python`: Custom Python executable or auto-detected `.venv/bin/python` relative to the command's own `cwd`.
+  - `envFile`: Optional `.env` dotenv file relative to the command's `cwd`.
+  - `env`: Key-value environment variable overrides specific to that command.
+- **Interactive `⚙️ Env` Studio UI**:
+  - Every Action card and DataNode card features a compact `⚙️ Env` button.
+  - Displays `⚙️ Env` when inheriting defaults, and highlights with `⚙️ Custom Env` when overridden.
+  - Inline `CommandEnvEditor` panel provides directory autocomplete, quick-fill chips, and controls to Apply, Save to `manifest.yaml`, Reset to Default, or set `cwd` as the Skill Default Preference.
 
 ## 4. Progressive Knowledge References (Deep-Dive Manuals)
 

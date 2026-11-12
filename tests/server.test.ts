@@ -2090,4 +2090,230 @@ actionGroups:
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });
+
+  test("15. Per-Command Execution Environment (cwd + python + envFile + env) & Default Workspace Preference Inheritance", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-test-cmd-env-"));
+    const agentsDir = join(tmpBase, ".agents/skills");
+    const skillDir = join(agentsDir, "env-skill");
+    const wsDefault = join(tmpBase, "ws-default");
+    const wsCustom = join(tmpBase, "ws-custom");
+
+    mkdirSync(join(skillDir, ".dashboard"), { recursive: true });
+    mkdirSync(join(wsDefault, ".venv/bin"), { recursive: true });
+    mkdirSync(join(wsCustom, ".venv/bin"), { recursive: true });
+
+    // Create distinct .venv/bin/python in wsDefault and wsCustom
+    writeFileSync(
+      join(wsDefault, ".venv/bin/python"),
+      "#!/bin/sh\nexec python3 \"$@\"\n",
+      { mode: 0o755 }
+    );
+    writeFileSync(
+      join(wsCustom, ".venv/bin/python"),
+      "#!/bin/sh\nexec python3 \"$@\"\n",
+      { mode: 0o755 }
+    );
+
+    // Create a file in wsCustom for /api/fs/complete testing and a .env.uat file
+    writeFileSync(join(wsCustom, "custom-target.xlsx"), "excel-bytes", "utf-8");
+    writeFileSync(
+      join(wsCustom, ".env.uat"),
+      "STAGE=uat_from_dotenv\nAPI_TOKEN=\"top_secret_uat_token\"\nexport REGION='us-west-2'\n",
+      "utf-8"
+    );
+
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: env-skill\ndescription: Per-command execution environment test\n---\n# Env Skill\n",
+      "utf-8"
+    );
+
+    const manifest = {
+      id: "env-skill",
+      name: "Env Skill",
+      category: "Engineering Tools",
+      description: "Test command-level execution environments",
+      defaultWorkspace: wsDefault,
+      envVars: [
+        { key: "STAGE", label: "Stage", default: "dev_default" },
+        { key: "API_TOKEN", label: "API Token", secret: true },
+      ],
+      data: [
+        {
+          id: "probe-env",
+          title: "Probe Active Environment",
+          runtime: "zsh",
+          // Inherits wsDefault initially
+          command:
+            "python3 -c 'import json, os; print(json.dumps({\"cwd\": os.getcwd(), \"stage\": os.environ.get(\"STAGE\"), \"region\": os.environ.get(\"REGION\", \"none\"), \"py\": \"{{python}}\"}))'",
+          shape: "kv",
+          parse: { format: "json" },
+        },
+        {
+          id: "derived-stage",
+          title: "Derived Stage Scalar",
+          runtime: "ts",
+          prelude: true,
+          shape: "scalar",
+          sync: { dependsOn: ["probe-env"] },
+          code: "return { value: data['probe-env']?.stage || 'unknown', tone: 'info' };",
+        },
+      ],
+      actionGroups: [
+        {
+          name: "Ops",
+          actions: [
+            {
+              id: "act-inherit",
+              title: "Inherited Default Action",
+              danger: "safe",
+              command: "{{python}} -m pytest",
+            },
+            {
+              id: "act-yaml-custom",
+              title: "YAML Custom Env Action",
+              danger: "safe",
+              cwd: wsCustom,
+              envFile: ".env.uat",
+              env: { CUSTOM_FLAG: "enabled" },
+              command: "{{python}} run_audit.py {{form.target}}",
+              form: [{ key: "target", label: "Target File", type: "file" }],
+            },
+          ],
+        },
+      ],
+    };
+
+    writeFileSync(
+      join(skillDir, ".dashboard/manifest.yaml"),
+      JSON.stringify(manifest, null, 2),
+      "utf-8"
+    );
+
+    const srv = createDashboardServer({
+      port: 0,
+      homeDir: tmpBase,
+      configDir: join(tmpBase, ".config/skill-dashboard"),
+      dataDir: join(tmpBase, ".local/share/skill-dashboard"),
+      cacheDir: join(tmpBase, ".cache/skill-dashboard"),
+      defaultWorkspace: wsDefault,
+      agentRoots: [
+        {
+          agent: "agents-hub",
+          label: "Agents Hub",
+          path: agentsDir,
+          scope: "global",
+        },
+      ],
+    });
+
+    try {
+      // 1. Preview `act-inherit`: should inherit wsDefault and resolve wsDefault/.venv/bin/python
+      const prevInherit = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skillId: "env-skill", actionId: "act-inherit" }),
+        })
+      ).json()) as any;
+
+      expect(prevInherit.cwd).toBe(wsDefault);
+      expect(prevInherit.maskedCommand).toContain(join(wsDefault, ".venv/bin/python"));
+      expect(prevInherit.resolvedEnv.isCustom).toBe(false);
+      expect(prevInherit.resolvedEnv.effectiveEnv.STAGE).toBe("dev_default");
+
+      // 2. Preview `act-yaml-custom`: should resolve wsCustom, auto-detect wsCustom/.venv/bin/python, load .env.uat, and mask API_TOKEN!
+      const prevCustom = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "env-skill",
+            actionId: "act-yaml-custom",
+            formValues: { target: "custom-target.xlsx" },
+          }),
+        })
+      ).json()) as any;
+
+      expect(prevCustom.cwd).toBe(wsCustom);
+      expect(prevCustom.maskedCommand).toContain(join(wsCustom, ".venv/bin/python"));
+      expect(prevCustom.resolvedEnv.isCustom).toBe(true);
+      expect(prevCustom.resolvedEnv.effectiveEnv.STAGE).toBe("uat_from_dotenv");
+      expect(prevCustom.resolvedEnv.effectiveEnv.REGION).toBe("us-west-2");
+      expect(prevCustom.resolvedEnv.effectiveEnv.CUSTOM_FLAG).toBe("enabled");
+      expect(prevCustom.resolvedEnv.effectiveEnv.API_TOKEN).toBe("********");
+
+      // 3. Test /api/fs/complete rooted at action's custom cwd (wsCustom)
+      const completeRes = (await (
+        await fetch(
+          `${srv.url}/api/fs/complete?skillId=env-skill&cwd=${encodeURIComponent(wsCustom)}&prefix=custom-`
+        )
+      ).json()) as any;
+      expect(completeRes.suggestions.some((s: any) => s.path === "custom-target.xlsx")).toBe(true);
+
+      // 4. Evaluate DataNodes initially: `probe-env` inherits wsDefault and STAGE=dev_default
+      const initData = (await (await fetch(`${srv.url}/api/skills/env-skill/data`)).json()) as any;
+      expect(initData.snapshots["probe-env"].value.record.cwd).toContain("ws-default");
+      expect(initData.snapshots["probe-env"].value.record.stage).toBe("dev_default");
+      expect(initData.snapshots["probe-env"].resolvedEnv.isCustom).toBe(false);
+      expect(initData.snapshots["derived-stage"].value.value).toBe("dev_default");
+
+      // 5. Override `probe-env` DataNode's execution environment via PUT /api/skills/env-skill/command-env
+      // Should persist to SQLite, optionally write to manifest, and automatically invalidate downstream `derived-stage`!
+      const updateNodeEnvRes = (await (
+        await fetch(`${srv.url}/api/skills/env-skill/command-env`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targetKind: "data",
+            targetId: "probe-env",
+            envConfig: {
+              cwd: wsCustom,
+              envFile: ".env.uat",
+              env: { STAGE: "prod_override" },
+            },
+            saveToManifest: true,
+          }),
+        })
+      ).json()) as any;
+
+      expect(updateNodeEnvRes.snapshot.status).toBe("ready");
+      expect(updateNodeEnvRes.snapshot.value.record.cwd).toContain("ws-custom");
+      expect(updateNodeEnvRes.snapshot.value.record.stage).toBe("prod_override");
+      expect(updateNodeEnvRes.snapshot.value.record.region).toBe("us-west-2");
+      expect(updateNodeEnvRes.snapshot.value.record.py).toContain(join(wsCustom, ".venv/bin/python"));
+      expect(updateNodeEnvRes.snapshot.resolvedEnv.isCustom).toBe(true);
+
+      // Downstream `derived-stage` must have been invalidated and recomputed to "prod_override"!
+      const downstreamSnap = (await (
+        await fetch(`${srv.url}/api/skills/env-skill/data/derived-stage`)
+      ).json()) as any;
+      expect(downstreamSnap.value.value).toBe("prod_override");
+
+      // Verify manifest.yaml on disk was updated with probe-env's envConfig
+      const diskManifest = readFileSync(join(skillDir, ".dashboard/manifest.yaml"), "utf-8");
+      expect(diskManifest).toContain("prod_override");
+
+      // 6. Reset `probe-env` environment back to default preference (envConfig: null)
+      const resetRes = (await (
+        await fetch(`${srv.url}/api/skills/env-skill/command-env`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            targetKind: "data",
+            targetId: "probe-env",
+            envConfig: null,
+            saveToManifest: true,
+          }),
+        })
+      ).json()) as any;
+
+      expect(resetRes.snapshot.value.record.cwd).toContain("ws-default");
+      expect(resetRes.snapshot.value.record.stage).toBe("dev_default");
+      expect(resetRes.snapshot.resolvedEnv.isCustom).toBe(false);
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
 });

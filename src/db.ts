@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { normalizeStoredArtifacts } from "./artifacts.ts";
-import type { ExecutionRun, RunArtifact, RunStatus, UnitEvent } from "./types.ts";
+import type { CommandEnvConfig, ExecutionRun, RunArtifact, RunStatus, UnitEvent } from "./types.ts";
 
 export class DashboardDatabase {
   public db: Database;
@@ -267,6 +267,41 @@ export class DashboardDatabase {
 
   public setSkillEnv(skillId: string, env: Record<string, string>): void {
     this.setSetting(`skill_env:${skillId}`, JSON.stringify(env));
+  }
+
+  public getCommandEnvOverrides(skillId: string): Record<string, CommandEnvConfig> {
+    const prefix = `cmd_env:${skillId}:`;
+    const rows = this.db
+      .query(`SELECT key, value FROM settings WHERE key LIKE $prefix`)
+      .all({ $prefix: `${prefix}%` }) as Array<{ key: string; value: string }>;
+
+    const result: Record<string, CommandEnvConfig> = {};
+    for (const row of rows) {
+      if (row.key.startsWith(prefix)) {
+        const subKey = row.key.slice(prefix.length);
+        try {
+          result[subKey] = JSON.parse(row.value);
+        } catch {}
+      }
+    }
+    return result;
+  }
+
+  public setCommandEnvOverride(
+    skillId: string,
+    targetKind: "action" | "data",
+    targetId: string,
+    config: CommandEnvConfig | null
+  ): void {
+    const key = `cmd_env:${skillId}:${targetKind}:${targetId}`;
+    if (
+      !config ||
+      (!config.cwd && !config.python && !config.envFile && (!config.env || Object.keys(config.env).length === 0))
+    ) {
+      this.db.prepare(`DELETE FROM settings WHERE key = $key`).run({ $key: key });
+    } else {
+      this.setSetting(key, JSON.stringify(config));
+    }
   }
 
   public insertUnitEvent(params: {

@@ -13,11 +13,14 @@ import React, { useEffect, useState } from "react";
 import { interpolateBoundTriggerArgs } from "../interpolator.ts";
 import type {
   BoundActionTrigger,
+  CanonicalSkill,
+  CommandEnvConfig,
   ContextField,
   DataNode,
   DataSnapshot,
   TableColumn,
 } from "../types.ts";
+import { CommandEnvEditor } from "./CommandEnvEditor.tsx";
 import { ansiToHtml } from "./highlight.ts";
 
 interface StatusProbesBarProps {
@@ -26,6 +29,8 @@ interface StatusProbesBarProps {
   dataNodes: DataNode[];
   activeWorkspace: string;
   refreshTrigger: number;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   onContextChanged?: (nextContext: Record<string, string | boolean>) => void;
   onExecuteBoundTrigger: (params: {
     actionId: string;
@@ -40,6 +45,8 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   dataNodes,
   activeWorkspace,
   refreshTrigger,
+  commandEnvOverrides,
+  onSkillUpdated,
   onContextChanged,
   onExecuteBoundTrigger,
 }) => {
@@ -51,6 +58,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const [selectedRowKeys, setSelectedRowKeys] = useState<Record<string, Set<string>>>({});
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [showIntermediates, setShowIntermediates] = useState<boolean>(false);
+  const [openEnvNodeId, setOpenEnvNodeId] = useState<string | null>(null);
 
   const intermediateNodes = (dataNodes || []).filter((n) => Boolean(n.intermediate || n.hidden));
   const primaryNodes = (dataNodes || []).filter((n) => !n.intermediate && !n.hidden);
@@ -529,6 +537,16 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
             const shape = snap?.shape || node.shape || "raw";
             const isFullSpan = shape === "table" || shape === "matrix";
             const isIntermediate = Boolean(node.intermediate || node.hidden);
+            const envSummary = snap?.resolvedEnv;
+            const uiOverride = commandEnvOverrides?.[`data:${node.id}`];
+            const isCustomEnv = Boolean(
+              envSummary?.isCustom ||
+              uiOverride ||
+              node.cwd ||
+              node.python ||
+              node.envFile ||
+              (node.env && Object.keys(node.env).length > 0)
+            );
 
             return (
               <div
@@ -587,6 +605,23 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
 
                     <button
                       type="button"
+                      onClick={() => setOpenEnvNodeId((prev) => (prev === node.id ? null : node.id))}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
+                        isCustomEnv
+                          ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-sm"
+                          : "st-btn-secondary border-transparent"
+                      }`}
+                      title={
+                        isCustomEnv
+                          ? `Custom Env: cwd: ${envSummary?.cwd || node.cwd || activeWorkspace}`
+                          : `cwd: ${envSummary?.cwd || activeWorkspace} · python: ${envSummary?.python || "auto"}`
+                      }
+                    >
+                      <span>⚙️ {isCustomEnv ? (envSummary?.badgeText || "Custom Env") : "Env"}</span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => refreshSingleNode(node)}
                       disabled={loading}
                       className="p-1.5 rounded-lg st-btn-secondary"
@@ -598,6 +633,44 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Command Execution Environment Editor Panel */}
+                {openEnvNodeId === node.id && (
+                  <CommandEnvEditor
+                    skillId={skillId}
+                    targetKind="data"
+                    targetId={node.id}
+                    targetTitle={node.title}
+                    defaultWorkspace={activeWorkspace}
+                    initialConfig={{
+                      cwd: node.cwd,
+                      python: node.python,
+                      envFile: node.envFile,
+                      env: node.env,
+                      ...uiOverride,
+                    }}
+                    resolvedSummary={envSummary}
+                    onSaved={(result) => {
+                      if (result.skill) {
+                        onSkillUpdated?.(result.skill);
+                      }
+                      if (result.snapshot) {
+                        setSnapshots((prev) => ({ ...prev, [node.id]: result.snapshot! }));
+                        const downstream = (dataNodes || []).filter(
+                          (dn) =>
+                            dn.id !== node.id &&
+                            (dn.sync?.dependsOn?.includes(node.id) ||
+                              snap?.consumedBy?.includes(dn.id) ||
+                              snap?.consumedBy?.includes(`data:${dn.id}`))
+                        );
+                        for (const dn of downstream) {
+                          refreshSingleNode(dn);
+                        }
+                      }
+                    }}
+                    onClose={() => setOpenEnvNodeId(null)}
+                  />
+                )}
 
                 {node.description && (
                   <p className="text-xs st-text-secondary">{node.description}</p>

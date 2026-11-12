@@ -42,14 +42,15 @@ Inside any `ts` or `python` node, `ctx` provides:
 interface DataExecutionContext {
   skillId: string;                     // e.g. "vsip"
   skillDir: string;                    // canonical path of the unit
-  workspace: string;                   // effectiveWorkspace ({{project_root}})
-  python: string;                      // resolved python executable ({{python}})
+  workspace: string;                   // effectiveWorkspace ({{project_root}} skill default preference)
+  cwd: string;                         // resolved working directory for this specific DataNode (inherits workspace unless overridden)
+  python: string;                      // resolved python executable for this DataNode's cwd ({{python}})
   dataDir: string;                     // ~/.local/share/skill-dashboard/units/<id> ({{data_dir}})
   cacheDir: string;                    // ~/.cache/skill-dashboard/units/<id> ({{cache_dir}})
   artifactsDir: string;                // ~/.local/share/skill-dashboard/artifacts/<id>/latest ({{artifacts_dir}})
   context: Record<string, unknown>;    // current values of all context: fields
   data: Record<string, any>;           // evaluated values/rows of upstream dependsOn data nodes
-  env: Record<string, string>;         // configured per-unit envVars
+  env: Record<string, string>;         // merged envVars + node envFile + node env overrides
 }
 ```
 

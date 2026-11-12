@@ -227,6 +227,28 @@ export const DataRuntimeSchema = z.enum([
 
 export type DataRuntime = z.infer<typeof DataRuntimeSchema>;
 
+export const CommandEnvConfigSchema = z.object({
+  cwd: z.string().optional(),
+  python: z.string().optional(),
+  envFile: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+
+export type CommandEnvConfig = z.infer<typeof CommandEnvConfigSchema>;
+
+export interface ResolvedCommandEnvSummary {
+  cwd: string;
+  python: string;
+  venvDir?: string | null;
+  envFile?: string;
+  customEnvKeys: string[];
+  effectiveEnv: Record<string, string>;
+  rawOverride?: CommandEnvConfig;
+  isCustom: boolean;
+  hasUiOverride: boolean;
+  badgeText: string;
+}
+
 export const DataNodeSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -246,6 +268,9 @@ export const DataNodeSchema = z.object({
   valueFormat: z.enum(["basename", "relative", "abspath"]).default("basename").optional(),
   filePath: z.string().optional(),
   cwd: z.string().optional(),
+  python: z.string().optional(),
+  envFile: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().default(15000).optional(),
   parse: DataParserSchema.optional(),
   transform: DataTransformSchema.optional(),
@@ -321,6 +346,9 @@ export const ActionItemSchema = z
       .enum(["web_terminal", "external_terminal", "copy_command", "copy_agent_prompt"])
       .default("web_terminal"),
     cwd: z.string().optional(),
+    python: z.string().optional(),
+    envFile: z.string().optional(),
+    env: z.record(z.string(), z.string()).optional(),
     command: z.string().optional(),
     script: z.string().optional(),
     form: z.array(FormFieldSchema).optional(),
@@ -342,6 +370,9 @@ export interface ActionItem {
   interactive?: boolean;
   defaultRunner: "web_terminal" | "external_terminal" | "copy_command" | "copy_agent_prompt";
   cwd?: string;
+  python?: string;
+  envFile?: string;
+  env?: Record<string, string>;
   command: string;
   script?: string;
   form?: FormField[];
@@ -472,6 +503,7 @@ export interface DataSnapshot {
   intermediate?: boolean;
   rawParsed?: unknown;
   consumedBy?: string[];
+  resolvedEnv?: ResolvedCommandEnvSummary;
   shape: DataShape;
   runtime: DataRuntime;
   status: "idle" | "loading" | "streaming" | "ready" | "error";
@@ -560,6 +592,7 @@ export interface CanonicalSkill {
   effectiveWorkspace: string;
   pythonExecutable: string;
   configuredEnv: Record<string, string>;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
   mounts: AgentMount[];
   provenance?: LockProvenance;
   hasOpenAiYaml: boolean;

@@ -1,6 +1,13 @@
-import { existsSync } from "fs";
-import { dirname, join, resolve } from "path";
-import type { ActionItem, DataSnapshot, FormField } from "./types.ts";
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
+import type {
+  ActionItem,
+  CommandEnvConfig,
+  DataSnapshot,
+  FormField,
+  ResolvedCommandEnvSummary,
+} from "./types.ts";
 
 export function shellEscape(val: string): string {
   if (val === "") return "''";
@@ -37,18 +44,263 @@ export function escapeForTemplateOffset(text: string, offset: number, val: strin
   return shellEscape(val);
 }
 
-export function resolvePythonExecutable(activeWorkspace: string): string {
-  let curr = resolve(activeWorkspace);
+export function parseDotenvContent(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const lines = content.split(/\r?\n/);
+  for (const rawLine of lines) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("export ")) {
+      line = line.slice(7).trim();
+    }
+    const eqIdx = line.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = line.slice(0, eqIdx).trim();
+    if (!key) continue;
+    let val = line.slice(eqIdx + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    } else {
+      const commentIdx = val.indexOf(" #");
+      if (commentIdx !== -1) {
+        val = val.slice(0, commentIdx).trim();
+      }
+    }
+    result[key] = val;
+  }
+  return result;
+}
+
+export function detectVenvAndPython(startDir: string): { pythonRaw: string; venvDir: string | null } {
+  let curr = resolve(startDir);
   for (let i = 0; i < 4; i++) {
-    const venvPy = join(curr, ".venv/bin/python");
-    if (existsSync(venvPy)) {
-      return shellEscape(venvPy);
+    const dotVenv = join(curr, ".venv");
+    const dotVenvPy = join(dotVenv, "bin/python");
+    if (existsSync(dotVenvPy)) {
+      return { pythonRaw: dotVenvPy, venvDir: dotVenv };
+    }
+    const plainVenv = join(curr, "venv");
+    const plainVenvPy = join(plainVenv, "bin/python");
+    if (existsSync(plainVenvPy)) {
+      return { pythonRaw: plainVenvPy, venvDir: plainVenv };
     }
     const parent = dirname(curr);
     if (parent === curr) break;
     curr = parent;
   }
-  return "python3";
+  return { pythonRaw: "python3", venvDir: null };
+}
+
+export function resolvePythonExecutable(activeWorkspace: string): string {
+  const detected = detectVenvAndPython(activeWorkspace);
+  return detected.pythonRaw === "python3" ? "python3" : shellEscape(detected.pythonRaw);
+}
+
+export interface ResolvedCommandEnvironment extends ResolvedCommandEnvSummary {
+  pythonRaw: string; // unescaped path or "python3"
+  pythonEscaped: string; // shell-escaped for {{python}}
+  realEnv: Record<string, string>; // unmasked merged env for subprocess execution
+}
+
+export function resolveCommandEnvironment(params: {
+  skillDir: string;
+  defaultWorkspace: string;
+  skillDefaultEnv?: Record<string, string>;
+  secretKeys?: Set<string>;
+  yamlConfig?: CommandEnvConfig;
+  uiOverride?: CommandEnvConfig;
+  interpolateToken?: (raw: string, baseCwd: string) => string;
+}): ResolvedCommandEnvironment {
+  const {
+    skillDir,
+    defaultWorkspace,
+    skillDefaultEnv = {},
+    secretKeys,
+    yamlConfig,
+    uiOverride,
+    interpolateToken = (raw: string, _base: string) => raw,
+  } = params;
+
+  // 1. cwd
+  const rawCwdSpec = uiOverride?.cwd?.trim() || yamlConfig?.cwd?.trim() || "project_root";
+  const cwdSpec = interpolateToken(rawCwdSpec, defaultWorkspace).trim();
+  let resolvedCwd: string;
+  if (!cwdSpec || cwdSpec === "project_root" || cwdSpec === ".") {
+    resolvedCwd = resolve(defaultWorkspace);
+  } else if (cwdSpec === "skill_dir") {
+    resolvedCwd = resolve(skillDir);
+  } else if (cwdSpec === "~") {
+    resolvedCwd = homedir();
+  } else if (cwdSpec.startsWith("~/")) {
+    resolvedCwd = join(homedir(), cwdSpec.slice(2));
+  } else if (isAbsolute(cwdSpec)) {
+    resolvedCwd = resolve(cwdSpec);
+  } else {
+    resolvedCwd = resolve(defaultWorkspace, cwdSpec);
+  }
+
+  // 2. pythonRaw & venvDir
+  const rawPySpec = uiOverride?.python?.trim() || yamlConfig?.python?.trim() || "";
+  let pythonRaw: string;
+  let venvDir: string | null = null;
+
+  if (rawPySpec) {
+    if (rawPySpec === "python3" || rawPySpec === "python") {
+      pythonRaw = rawPySpec;
+      venvDir = null;
+    } else {
+      let expandedPy: string;
+      if (rawPySpec === "~") {
+        expandedPy = homedir();
+      } else if (rawPySpec.startsWith("~/")) {
+        expandedPy = join(homedir(), rawPySpec.slice(2));
+      } else if (isAbsolute(rawPySpec)) {
+        expandedPy = resolve(rawPySpec);
+      } else {
+        expandedPy = resolve(resolvedCwd, rawPySpec);
+      }
+      pythonRaw = expandedPy;
+      const pyDir = dirname(pythonRaw);
+      if (
+        (pyDir.endsWith("/bin") || basename(pyDir) === "bin") &&
+        (existsSync(join(pyDir, "activate")) || existsSync(join(dirname(pyDir), "pyvenv.cfg")))
+      ) {
+        venvDir = dirname(pyDir);
+      } else {
+        venvDir = null;
+      }
+    }
+  } else {
+    // First try detectVenvAndPython(resolvedCwd)
+    const fromCwd = detectVenvAndPython(resolvedCwd);
+    if (fromCwd.venvDir) {
+      pythonRaw = fromCwd.pythonRaw;
+      venvDir = fromCwd.venvDir;
+    } else {
+      const fromWs = detectVenvAndPython(defaultWorkspace);
+      pythonRaw = fromWs.pythonRaw;
+      venvDir = fromWs.venvDir;
+    }
+  }
+
+  const pythonEscaped =
+    pythonRaw === "python3" || pythonRaw === "python" ? pythonRaw : shellEscape(pythonRaw);
+
+  // 3. realEnv & effectiveEnv (masked) & envFile
+  const realEnv: Record<string, string> = { ...skillDefaultEnv };
+  let resolvedEnvFile: string | undefined = undefined;
+  const customEnvKeysSet = new Set<string>();
+
+  const applyEnvFile = (spec?: string) => {
+    if (!spec || !spec.trim()) return;
+    const trimmedSpec = spec.trim();
+    let resolvedPath = interpolateToken(trimmedSpec, resolvedCwd).trim();
+    if (resolvedPath === "~") {
+      resolvedPath = homedir();
+    } else if (resolvedPath.startsWith("~/")) {
+      resolvedPath = join(homedir(), resolvedPath.slice(2));
+    } else if (!isAbsolute(resolvedPath)) {
+      resolvedPath = resolve(resolvedCwd, resolvedPath);
+    }
+    if (existsSync(resolvedPath)) {
+      const parsed = parseDotenvContent(readFileSync(resolvedPath, "utf-8"));
+      for (const [k, v] of Object.entries(parsed)) {
+        realEnv[k] = v;
+        customEnvKeysSet.add(k);
+      }
+      resolvedEnvFile = trimmedSpec;
+    }
+  };
+
+  // Merge in order:
+  // 1. applyEnvFile(yamlConfig?.envFile)
+  applyEnvFile(yamlConfig?.envFile);
+  // 2. yamlConfig?.env (interpolating values via interpolateToken(String(v), resolvedCwd))
+  if (yamlConfig?.env) {
+    for (const [k, v] of Object.entries(yamlConfig.env)) {
+      const interpolatedVal = interpolateToken(String(v), resolvedCwd);
+      realEnv[k] = interpolatedVal;
+      customEnvKeysSet.add(k);
+    }
+  }
+  // 3. applyEnvFile(uiOverride?.envFile)
+  applyEnvFile(uiOverride?.envFile);
+  // 4. uiOverride?.env (interpolating values via interpolateToken(String(v), resolvedCwd))
+  if (uiOverride?.env) {
+    for (const [k, v] of Object.entries(uiOverride.env)) {
+      const interpolatedVal = interpolateToken(String(v), resolvedCwd);
+      realEnv[k] = interpolatedVal;
+      customEnvKeysSet.add(k);
+    }
+  }
+
+  const customEnvKeys = [...customEnvKeysSet];
+
+  // Build effectiveEnv (masked copy of realEnv)
+  const effectiveEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(realEnv)) {
+    const isSecret = secretKeys?.has(k) || /SECRET|TOKEN|PASSWORD|KEY/i.test(k);
+    if (isSecret && v !== "") {
+      effectiveEnv[k] = "********";
+    } else {
+      effectiveEnv[k] = v;
+    }
+  }
+
+  const hasUiOverride = Boolean(
+    uiOverride &&
+      (uiOverride.cwd?.trim() ||
+        uiOverride.python?.trim() ||
+        uiOverride.envFile?.trim() ||
+        (uiOverride.env && Object.keys(uiOverride.env).length > 0))
+  );
+
+  const isCustom =
+    hasUiOverride ||
+    resolvedCwd !== resolve(defaultWorkspace) ||
+    Boolean(rawPySpec) ||
+    Boolean(resolvedEnvFile) ||
+    customEnvKeys.length > 0;
+
+  let badgeText: string;
+  if (!isCustom) {
+    badgeText = "Env";
+  } else {
+    const parts: string[] = [];
+    const cwdShort = basename(resolvedCwd) || resolvedCwd;
+    if (resolvedCwd !== resolve(defaultWorkspace) || uiOverride?.cwd) {
+      parts.push(cwdShort);
+    }
+    if (rawPySpec) {
+      parts.push("py");
+    }
+    if (resolvedEnvFile) {
+      parts.push(resolvedEnvFile);
+    }
+    if (customEnvKeys.length > 0) {
+      parts.push(`+${customEnvKeys.length} env`);
+    }
+    badgeText = parts.length > 0 ? parts.join(" · ") : "Custom Env";
+  }
+
+  return {
+    cwd: resolvedCwd,
+    python: pythonRaw,
+    pythonRaw,
+    pythonEscaped,
+    venvDir,
+    envFile: resolvedEnvFile,
+    customEnvKeys,
+    effectiveEnv,
+    realEnv,
+    rawOverride: uiOverride,
+    isCustom,
+    hasUiOverride,
+    badgeText,
+  };
 }
 
 export function isFieldVisible(field: FormField, values: Record<string, unknown>): boolean {
@@ -195,6 +447,8 @@ export interface InterpolatedCommandResult {
   cwd: string;
   env: Record<string, string>;
   maskedParams: Record<string, unknown>;
+  resolvedEnv: ResolvedCommandEnvSummary;
+  venvDir?: string | null;
 }
 
 export function interpolateActionCommand(params: {
@@ -207,6 +461,9 @@ export function interpolateActionCommand(params: {
   formValues?: Record<string, unknown>;
   contextValues?: Record<string, unknown>;
   dataSnapshots?: Record<string, DataSnapshot | undefined>;
+  skillDefaultEnv?: Record<string, string>;
+  secretKeys?: Set<string>;
+  uiEnvOverride?: CommandEnvConfig;
   humanApproved?: boolean;
   previewOnly?: boolean;
 }): InterpolatedCommandResult {
@@ -220,6 +477,9 @@ export function interpolateActionCommand(params: {
     formValues = {},
     contextValues = {},
     dataSnapshots = {},
+    skillDefaultEnv,
+    secretKeys,
+    uiEnvOverride,
     humanApproved = false,
     previewOnly = false,
   } = params;
@@ -232,18 +492,7 @@ export function interpolateActionCommand(params: {
     }
   }
 
-  const pythonExec = resolvePythonExecutable(activeWorkspace);
-  const resolvedCwd =
-    !action.cwd || action.cwd === "project_root" || action.cwd === "."
-      ? activeWorkspace
-      : action.cwd === "skill_dir"
-        ? skillDir
-        : resolve(activeWorkspace, action.cwd);
-
-  const env: Record<string, string> = {};
-  if (dataDir) env.SD_DATA_DIR = dataDir;
-  if (cacheDir) env.SD_CACHE_DIR = cacheDir;
-  if (artifactsDir) env.SD_ARTIFACTS_DIR = artifactsDir;
+  const formEnvSecrets: Record<string, string> = {};
   const maskedParams: Record<string, unknown> = {};
   const realTokens: Record<string, string> = {};
   const maskedTokens: Record<string, string> = {};
@@ -290,7 +539,7 @@ export function interpolateActionCommand(params: {
       maskedParams[field.key] = secretStr ? "********" : "";
       if (secretStr) {
         const envKey = field.envVar || field.key.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
-        env[envKey] = secretStr;
+        formEnvSecrets[envKey] = secretStr;
         if (field.flag) {
           realTokens[field.key] = `${field.flag} ${shellEscape(secretStr)}`;
           maskedTokens[field.key] = `${field.flag} ********`;
@@ -354,9 +603,67 @@ export function interpolateActionCommand(params: {
     maskedTokens[field.key] = token;
   }
 
+  // Resolve command environment after computing rawFieldValues
+  const interpolateToken = (raw: string, baseCwd: string): string => {
+    let res = raw
+      .replace(/\{\{\s*skill_dir\s*\}\}/g, skillDir)
+      .replace(/\{\{\s*project_root\s*\}\}/g, baseCwd || activeWorkspace)
+      .replace(/\{\{\s*data_dir\s*\}\}/g, dataDir)
+      .replace(/\{\{\s*cache_dir\s*\}\}/g, cacheDir)
+      .replace(/\{\{\s*artifacts_dir\s*\}\}/g, artifactsDir);
+
+    res = res.replace(/\{\{\s*context\.([a-zA-Z0-9_-]+)\s*\}\}/g, (_m, k) => {
+      const val = contextValues[k];
+      return val !== undefined && val !== null ? String(val) : "";
+    });
+
+    res = res.replace(/\{\{\s*data\.([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, expr) => {
+      return resolveDataSnapshotPath(dataSnapshots, expr);
+    });
+
+    res = res.replace(/\{\{\s*form\.([a-zA-Z0-9_-]+)\s*\}\}/g, (_m, k) => {
+      const val =
+        rawFieldValues[k] !== undefined
+          ? rawFieldValues[k]
+          : formValues[k] !== undefined && formValues[k] !== null
+            ? String(formValues[k])
+            : "";
+      return val;
+    });
+
+    return res;
+  };
+
+  const resolvedEnv = resolveCommandEnvironment({
+    skillDir,
+    defaultWorkspace: activeWorkspace,
+    skillDefaultEnv,
+    secretKeys,
+    yamlConfig: {
+      cwd: action.cwd,
+      python: action.python,
+      envFile: action.envFile,
+      env: action.env,
+    },
+    uiOverride: uiEnvOverride,
+    interpolateToken,
+  });
+
+  const env: Record<string, string> = {};
+  if (dataDir) env.SD_DATA_DIR = dataDir;
+  if (cacheDir) env.SD_CACHE_DIR = cacheDir;
+  if (artifactsDir) env.SD_ARTIFACTS_DIR = artifactsDir;
+  Object.assign(env, resolvedEnv.realEnv);
+  // Layer 5 highest priority: form env-secret fields
+  Object.assign(env, formEnvSecrets);
+
   const replaceTemplate = (tokenMap: Record<string, string>) => {
     let out = rawTemplate
-      .replace(/\{\{\s*python\s*\}\}/g, pythonExec)
+      .replace(/\{\{\s*python\s*\}\}/g, (_m, offset, str) =>
+        isOffsetInsideDoubleQuotes(str, offset)
+          ? escapeForTemplateOffset(str, offset, resolvedEnv.pythonRaw)
+          : resolvedEnv.pythonEscaped
+      )
       .replace(/\{\{\s*skill_dir\s*\}\}/g, (_m, offset, str) =>
         escapeForTemplateOffset(str, offset, skillDir)
       )
@@ -427,8 +734,10 @@ export function interpolateActionCommand(params: {
   return {
     command: replaceTemplate(realTokens),
     maskedCommand: replaceTemplate(maskedTokens),
-    cwd: resolvedCwd,
+    cwd: resolvedEnv.cwd,
     env,
     maskedParams,
+    resolvedEnv,
+    venvDir: resolvedEnv.venvDir,
   };
 }

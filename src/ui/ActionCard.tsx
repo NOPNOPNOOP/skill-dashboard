@@ -11,7 +11,14 @@ import {
   Terminal,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
-import type { ActionItem, FormField } from "../types.ts";
+import type {
+  ActionItem,
+  CanonicalSkill,
+  CommandEnvConfig,
+  FormField,
+  ResolvedCommandEnvSummary,
+} from "../types.ts";
+import { CommandEnvEditor } from "./CommandEnvEditor.tsx";
 import { highlightCodeToHtml } from "./highlight.ts";
 
 interface ActionCardProps {
@@ -20,6 +27,8 @@ interface ActionCardProps {
   activeWorkspace: string;
   refreshTrigger?: number;
   prefillValues?: Record<string, unknown> | null;
+  uiEnvOverride?: CommandEnvConfig;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   onExecute: (params: {
     actionId: string;
     formValues: Record<string, unknown>;
@@ -40,6 +49,8 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   activeWorkspace,
   refreshTrigger = 0,
   prefillValues,
+  uiEnvOverride,
+  onSkillUpdated,
   onExecute,
 }) => {
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() => {
@@ -149,6 +160,8 @@ export const ActionCard: React.FC<ActionCardProps> = ({
 
   const [previewCmd, setPreviewCmd] = useState<string>(action.command);
   const [previewCwd, setPreviewCwd] = useState<string>(activeWorkspace);
+  const [resolvedEnv, setResolvedEnv] = useState<ResolvedCommandEnvSummary | null>(null);
+  const [envPanelOpen, setEnvPanelOpen] = useState(false);
   const [copiedMode, setCopiedMode] = useState<"cmd" | "prompt" | null>(null);
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [dangerConfirmInput, setDangerConfirmInput] = useState("");
@@ -175,21 +188,37 @@ export const ActionCard: React.FC<ActionCardProps> = ({
     })
       .then((r) => r.json())
       .then((data) => {
-        if (!cancelled && data.maskedCommand) {
-          setPreviewCmd(data.maskedCommand);
-          setPreviewCwd(data.cwd || activeWorkspace);
+        if (!cancelled) {
+          if (data.maskedCommand) {
+            setPreviewCmd(data.maskedCommand);
+            setPreviewCwd(data.cwd || activeWorkspace);
+          }
+          if (data.resolvedEnv) {
+            setResolvedEnv(data.resolvedEnv);
+          }
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [skillId, action.id, formValues, activeWorkspace]);
+  }, [
+    skillId,
+    action.id,
+    formValues,
+    activeWorkspace,
+    uiEnvOverride,
+    action.cwd,
+    action.python,
+    action.envFile,
+    action.env,
+  ]);
 
   const fetchAutocomplete = async (fieldKey: string, prefix: string, type: string) => {
     try {
+      const cwdParam = encodeURIComponent(previewCwd || activeWorkspace);
       const res = await fetch(
-        `/api/fs/complete?skillId=${encodeURIComponent(skillId)}&prefix=${encodeURIComponent(prefix)}&type=${encodeURIComponent(type)}`
+        `/api/fs/complete?skillId=${encodeURIComponent(skillId)}&prefix=${encodeURIComponent(prefix)}&type=${encodeURIComponent(type)}&cwd=${cwdParam}`
       );
       const data = await res.json();
       setFileSuggestions((prev) => ({ ...prev, [fieldKey]: data.suggestions || [] }));
@@ -264,6 +293,16 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   };
   const visibleFields = (action.form || []).filter((f) => isFieldVisible(f, formValues));
 
+  const isCustomEnv = Boolean(
+    resolvedEnv?.isCustom ||
+    uiEnvOverride ||
+    (action.cwd && action.cwd !== "project_root") ||
+    action.python ||
+    action.envFile ||
+    (action.env && Object.keys(action.env).length > 0)
+  );
+  const customBadgeText = resolvedEnv?.badgeText || (isCustomEnv ? "Custom Env" : "Env");
+
   return (
     <div
       data-sd-pick-kind="action"
@@ -305,7 +344,45 @@ export const ActionCard: React.FC<ActionCardProps> = ({
             </p>
           )}
         </div>
+
+        <button
+          type="button"
+          onClick={() => setEnvPanelOpen((prev) => !prev)}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold transition-all border shrink-0 ${
+            isCustomEnv
+              ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-sm"
+              : "st-btn-secondary border-transparent"
+          }`}
+          title={`cwd: ${previewCwd}, python: ${resolvedEnv?.python || "auto"}`}
+        >
+          <span>⚙️ {customBadgeText}</span>
+        </button>
       </div>
+
+      {/* Inline Command Execution Environment Editor */}
+      {envPanelOpen && (
+        <CommandEnvEditor
+          skillId={skillId}
+          targetKind="action"
+          targetId={action.id}
+          targetTitle={action.title}
+          defaultWorkspace={activeWorkspace}
+          initialConfig={{
+            cwd: action.cwd,
+            python: action.python,
+            envFile: action.envFile,
+            env: action.env,
+            ...uiEnvOverride,
+          }}
+          resolvedSummary={resolvedEnv}
+          onSaved={(result) => {
+            if (result.skill) {
+              onSkillUpdated?.(result.skill);
+            }
+          }}
+          onClose={() => setEnvPanelOpen(false)}
+        />
+      )}
 
       {/* Dynamic Form Fields */}
       {visibleFields.length > 0 && (
@@ -536,12 +613,43 @@ export const ActionCard: React.FC<ActionCardProps> = ({
       {/* Live Highlighted Command / Inline Script Preview Bar */}
       <div className="px-3.5 py-2.5 rounded-xl st-code-surface border st-border flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1 overflow-x-auto">
-          <div className="text-[11px] font-mono st-text-muted mb-1 flex items-center gap-2">
-            <span>
-              {isMultiLine
-                ? `Live Workspace-Resolved Inline Script (isolated subshell · set -e · cwd: ${previewCwd})`
-                : `Live Workspace-Resolved Command (cwd: ${previewCwd})`}
-            </span>
+          <div className="text-[11px] font-mono st-text-muted mb-1.5 flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span>
+                {isMultiLine
+                  ? "Live Workspace-Resolved Inline Script (subshell · set -e)"
+                  : "Live Workspace-Resolved Command"}
+              </span>
+              <span className="text-[10.5px] px-1.5 py-0.5 rounded st-pill font-mono">
+                cwd: {previewCwd.split("/").slice(-2).join("/")}
+              </span>
+              {resolvedEnv?.venvDir ? (
+                <span className="text-[10.5px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono">
+                  python: .venv
+                </span>
+              ) : resolvedEnv?.python && resolvedEnv.python !== "python3" ? (
+                <span className="text-[10.5px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono">
+                  python: {resolvedEnv.python.split("/").slice(-2).join("/")}
+                </span>
+              ) : null}
+              {resolvedEnv?.customEnvKeys && resolvedEnv.customEnvKeys.length > 0 && (
+                <span className="text-[10.5px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30 font-mono">
+                  +{resolvedEnv.customEnvKeys.length} env
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setEnvPanelOpen((prev) => !prev)}
+              className={`px-2 py-0.5 rounded-lg text-[10.5px] font-semibold transition-all border shrink-0 ${
+                isCustomEnv
+                  ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40"
+                  : "st-btn-secondary border-transparent"
+              }`}
+              title={`cwd: ${previewCwd}, python: ${resolvedEnv?.python || "auto"}`}
+            >
+              ⚙️ {customBadgeText}
+            </button>
           </div>
           {isMultiLine ? (
             <pre
