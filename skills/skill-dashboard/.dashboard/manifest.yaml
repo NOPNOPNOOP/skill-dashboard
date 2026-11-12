@@ -5,7 +5,7 @@ description: >-
   Local full-stack Web Studio, Reactive Polyglot Compute Graph, Explicit Modular Manifest Linker, and Meta-Skill Operations Console for
   discovering, inspecting, tagging, mounting, validating, and executing AI Agent skills across Claude Code, Codex, OpenCode, Pi, OpenClaw, and npx skills.
 icon: ".dashboard/assets/icon.svg"
-defaultWorkspace: "~/.agents/skills/skill-dashboard"
+defaultWorkspace: "../.."
 tsPrelude: true
 
 envVars:

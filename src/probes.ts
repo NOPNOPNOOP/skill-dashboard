@@ -16,7 +16,9 @@ import * as pathModule from "path";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import YAML from "yaml";
 import {
+  DASHBOARD_ENGINE_ROOT,
   extractImplicitDependencies,
+  MANIFEST_CLI_PATH,
   resolveCommandEnvironment,
   resolveDataSnapshotPath,
   resolvePythonExecutable,
@@ -1143,6 +1145,11 @@ export class ReactiveGraphEngine {
       .replace(/\{\{\s*python\s*\}\}/g, py)
       .replace(/\{\{\s*skill_dir\s*\}\}/g, wrap(skill.canonicalPath))
       .replace(/\{\{\s*project_root\s*\}\}/g, wrap(skill.effectiveWorkspace))
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, wrap(DASHBOARD_ENGINE_ROOT))
+      .replace(
+        /\{\{\s*manifest_cli\s*\}\}/g,
+        escapeTokens ? `bun ${shellEscape(MANIFEST_CLI_PATH)}` : `bun ${MANIFEST_CLI_PATH}`
+      )
       .replace(/\{\{\s*data_dir\s*\}\}/g, wrap(sandbox.unitDataDir))
       .replace(/\{\{\s*cache_dir\s*\}\}/g, wrap(sandbox.unitCacheDir))
       .replace(/\{\{\s*artifacts_dir\s*\}\}/g, wrap(sandbox.latestArtifactsLink))

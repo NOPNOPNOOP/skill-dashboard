@@ -3,6 +3,7 @@ data:
   - id: service-telemetry
     title: "Service Daemon & SQLite Telemetry"
     description: "Live status of port 8766 server, macOS launchctl Keep-Alive agent, and SQLite run index (`runtime: ts` · `prelude: true` · `shape: kv` · `pollMs: 10000`)"
+    category: "1. Service & Runtime"
     runtime: ts
     prelude: true
     shape: kv
@@ -47,6 +48,7 @@ data:
   - id: recent-runs-table
     title: "Recent Execution Runs (SQLite `dashboard.db`)"
     description: "Zero-overhead native `bun:sqlite` query against `~/.local/share/skill-dashboard/dashboard.db` (`runtime: sqlite` · `shape: table`)"
+    category: "1. Service & Runtime"
     runtime: sqlite
     db: "~/.local/share/skill-dashboard/dashboard.db"
     sql: "SELECT skill_id AS skill, action_title AS action, status, exit_code AS exitCode, duration_ms AS durationMs FROM runs ORDER BY started_at DESC LIMIT 8"
@@ -71,9 +73,10 @@ data:
 
   - id: ecosystem-health
     title: "3-Tier Manifest & Ecosystem Audit Output"
-    description: "Live L1/L2/L3 validation output across all .dashboard/manifest.yaml files"
+    description: "Live L1/L2/L3 validation output across all .dashboard/manifest.yaml files (`{{manifest_cli}} validate`)"
+    category: "1. Service & Runtime"
     runtime: zsh
-    command: "bunx --bun manifest-cli validate"
+    command: "{{manifest_cli}} validate"
     cwd: project_root
     shape: raw
 
@@ -88,7 +91,7 @@ actionGroups:
         danger: safe
         defaultRunner: web_terminal
         cwd: project_root
-        command: "bunx --bun manifest-cli validate"
+        command: "{{manifest_cli}} validate"
 
       - id: build-ui
         title: "Rebuild Frontend Studio Bundle"
@@ -96,7 +99,7 @@ actionGroups:
         description: "Compile React + xterm.js frontend into dist/ via Bun.build."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         command: "bun run build:ui"
 
       - id: run-tests
@@ -105,7 +108,7 @@ actionGroups:
         description: "Execute automated bun test suite across discovery, 4-layer cascade, Reactive 2.0 graph, PTY, and SQLite re-attach."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         command: "bun test"
 
       - id: install-launchd
@@ -114,7 +117,7 @@ actionGroups:
         description: "Register com.local.skill-dashboard.plist in ~/Library/LaunchAgents so port 8766 stays online automatically."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         command: "bun run src/service-manager.ts install"
 
       - id: rebuild-and-restart
@@ -123,7 +126,7 @@ actionGroups:
         description: "Multi-line isolated script (`script: |`) that validates manifests, rebuilds dist/, and restarts the launchctl Keep-Alive service."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         script: |
           echo "1. Validating all companion manifests..."
           bun run src/validate-manifests.ts
@@ -138,7 +141,7 @@ actionGroups:
         description: "Retain the most recent N execution runs in dashboard.db and delete older .log files."
         danger: safe
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         command: "bun -e 'import { DashboardDatabase } from \"./src/db.ts\"; import { resolveDashboardPaths } from \"./src/paths.ts\"; const db = new DashboardDatabase(resolveDashboardPaths().dataDir); const deleted = db.pruneOldRuns({{form.keep}}); console.log(\"Pruned\", deleted, \"old runs.\"); db.close();'"
         form:
           - key: keep
@@ -153,5 +156,5 @@ actionGroups:
         description: "Remove com.local.skill-dashboard.plist from ~/Library/LaunchAgents."
         danger: warn
         defaultRunner: web_terminal
-        cwd: skill_dir
+        cwd: project_root
         command: "bun run src/service-manager.ts uninstall"

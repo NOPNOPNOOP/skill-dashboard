@@ -1,8 +1,40 @@
 # Module 02: Ecosystem Catalog, Symbol Graph CLI (`manifest-cli`) & Community Skills
 data:
+  - id: skills-catalog-raw
+    title: "Local Skills Hub Raw Scanner (Intermediate DAG Source)"
+    description: "Upstream intermediate node scanning `~/.agents/skills` once for downstream table & KPI nodes (`intermediate: true` · `runtime: ts` · `prelude: true`)"
+    category: "2. Skills & Ecosystem"
+    intermediate: true
+    runtime: ts
+    prelude: true
+    shape: raw
+    sync:
+      onMount: true
+    code: |
+      const hubDir = path.join(os.homedir(), ".agents/skills");
+      const items: any[] = [];
+      if (fs.existsSync(hubDir)) {
+        for (const entry of fs.readdirSync(hubDir).sort()) {
+          if (entry.startsWith(".")) continue;
+          const full = path.join(hubDir, entry);
+          try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
+          const hasManifest = fs.existsSync(path.join(full, ".dashboard/manifest.yaml"));
+          const hasScripts = fs.existsSync(path.join(full, "scripts")) || fs.existsSync(path.join(full, "tools"));
+          items.push({
+            id: entry,
+            status: hasManifest ? "studio-ready" : hasScripts ? "scripted" : "zero-config",
+            hasManifest,
+            hasScripts,
+            location: "~/.agents/skills",
+          });
+        }
+      }
+      return items;
+
   - id: skills-catalog-table
     title: "Local Skills Studio Audit ({{context.skill_scope}})"
-    description: "Reactive table of local skills filtered by `context.skill_scope` (`runtime: ts` · `prelude: true` · `shape: table` · `rowActions` · `fromData` source)"
+    description: "Reactive table derived from `skills-catalog-raw` filtered by `context.skill_scope` (`runtime: ts` · `prelude: true` · `shape: table` · `rowActions` · `fromData` source)"
+    category: "2. Skills & Ecosystem"
     runtime: ts
     prelude: true
     shape: table
@@ -13,6 +45,7 @@ data:
     sync:
       onMount: true
       dependsOn:
+        - "skills-catalog-raw"
         - "context.skill_scope"
     columns:
       - key: "id"
@@ -39,43 +72,39 @@ data:
         args:
           skill_id: "{{row.id}}"
     code: |
-      const hubDir = path.join(os.homedir(), ".agents/skills");
+      const allItems: any[] = Array.isArray(ctx.data["skills-catalog-raw"]) ? ctx.data["skills-catalog-raw"] : [];
       const scope = String(ctx.context.skill_scope || "studio");
-      const rows: any[] = [];
-      if (fs.existsSync(hubDir)) {
-        for (const entry of fs.readdirSync(hubDir).sort()) {
-          if (entry.startsWith(".")) continue;
-          const full = path.join(hubDir, entry);
-          try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
-          const hasManifest = fs.existsSync(path.join(full, ".dashboard/manifest.yaml"));
-          const hasScripts = fs.existsSync(path.join(full, "scripts")) || fs.existsSync(path.join(full, "tools"));
-          if (scope === "studio" && !hasManifest) continue;
-          if (scope === "scripts" && !hasScripts) continue;
-          rows.push({
-            id: entry,
-            status: hasManifest ? "studio-ready" : hasScripts ? "scripted" : "zero-config",
-            hasScripts,
-            location: "~/.agents/skills",
-          });
-        }
-      }
-      return rows;
+      return allItems
+        .filter((item) => {
+          if (scope === "studio" && !item.hasManifest) return false;
+          if (scope === "scripts" && !item.hasScripts) return false;
+          return true;
+        })
+        .map(({ id, status, hasScripts, location }) => ({
+          id,
+          status,
+          hasScripts,
+          location,
+        }));
 
   - id: studio-coverage-kpi
     title: "Filtered Skills in Scope ({{context.skill_scope}})"
-    description: "Derived scalar node computed in-memory from `skills-catalog-table` (`dependsOn` · `prelude: true` · 0 extra I/O)"
+    description: "Derived scalar node computed in-memory from `skills-catalog-raw` & `skills-catalog-table` (`dependsOn` · `prelude: true` · 0 extra I/O)"
+    category: "2. Skills & Ecosystem"
     runtime: ts
     prelude: true
     shape: scalar
     sync:
       onMount: true
       dependsOn:
+        - "skills-catalog-raw"
         - "skills-catalog-table"
     code: |
+      const allItems: any[] = Array.isArray(ctx.data["skills-catalog-raw"]) ? ctx.data["skills-catalog-raw"] : [];
       const rows: any[] = ctx.data["skills-catalog-table"] || [];
       const studioReady = rows.filter((r) => r.status === "studio-ready").length;
       return {
-        value: `${rows.length} Skills (${studioReady} Studio)`,
+        value: `${rows.length}/${allItems.length} Skills (${studioReady} Studio)`,
         unit: `in '${ctx.context.skill_scope}' scope`,
         tone: studioReady > 0 ? "success" : "info",
       };
@@ -91,7 +120,7 @@ actionGroups:
         danger: safe
         defaultRunner: web_terminal
         cwd: project_root
-        command: "bunx --bun manifest-cli map {{form.skill_id}}"
+        command: "{{manifest_cli}} map {{form.skill_id}}"
         form:
           - $ref: "#/defs/targetSkillField"
 
@@ -105,7 +134,7 @@ actionGroups:
         script: |
           TARGET="{{form.skill_id}}"
           echo "=== Skill: $TARGET (Scope: {{context.skill_scope}}) ==="
-          bunx --bun manifest-cli map "$TARGET"
+          {{manifest_cli}} map "$TARGET"
         form:
           - $ref: "#/defs/targetSkillField"
 

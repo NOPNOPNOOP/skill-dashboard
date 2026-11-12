@@ -24,33 +24,34 @@ Launch the Skill Dashboard server and open the browser UI (defaults to `http://1
 
 ```bash
 # 1. Start dashboard (or open browser if already running)
-# Uses bunx zero-install, or globally installed `skill-dashboard`
-bunx --bun skill-dashboard [--port 8766] [--workspace <path>] [--no-open]
+# Inside the skill-dashboard repository (or if linked globally via `bun link`):
+skill-dashboard [--port 8766] [--workspace <path>] [--no-open]
 
 # 2. Inspect & Scaffold Unconfigured Folders or Zero-Config Skills
-bunx --bun manifest-cli inspect <dir_path> [--json]
-bunx --bun manifest-cli init <dir_path> [--modular]
+# Inside .dashboard/manifest.yaml use `{{manifest_cli}} <subcommand>`; in shell use `manifest-cli` (or `bun <repo>/src/manifest-cli.ts`):
+manifest-cli inspect <dir_path> [--json]
+manifest-cli init <dir_path> [--modular]
 
 # 3. Manifest Symbol Graph, Cross-File Reference Tracker & 3-Tier Validator CLI
-bunx --bun manifest-cli map <unit_id> [--json]
-bunx --bun manifest-cli refs <unit_id> <symbol_id>
-bunx --bun manifest-cli validate [<unit_id>]
-bunx --bun manifest-cli eval-data <unit_id> [node_id] [--context=k=v]
-bunx --bun manifest-cli split <unit_id> [--write]
-bunx --bun manifest-cli bundle <unit_id>
-bunx --bun manifest-cli schema [data|includes|action]
+manifest-cli map <unit_id> [--json]
+manifest-cli refs <unit_id> <symbol_id>
+manifest-cli validate [<unit_id>]
+manifest-cli eval-data <unit_id> [node_id] [--context=k=v]
+manifest-cli split <unit_id> [--write]
+manifest-cli bundle <unit_id>
+manifest-cli schema [data|includes|action]
 
 # 4. Ephemeral Agent HITL Scratchpads & Synchronous Wait
-bunx --bun manifest-cli scratchpad create --id <slug> --title "<Title>" [--project <cwd>]
-bunx --bun manifest-cli wait <unit_id> [--since <seq_or_ts>] [--timeout 120]
-bunx --bun manifest-cli scratchpad promote <unit_id> --to project|skill
-bunx --bun manifest-cli scratchpad list
-bunx --bun manifest-cli scratchpad delete <unit_id>
+manifest-cli scratchpad create --id <slug> --title "<Title>" [--project <cwd>]
+manifest-cli wait <unit_id> [--since <seq_or_ts>] [--timeout 120]
+manifest-cli scratchpad promote <unit_id> --to project|skill
+manifest-cli scratchpad list
+manifest-cli scratchpad delete <unit_id>
 
 # 5. Manage Controlled Workspace Folders (~/.config/skill-dashboard/config.yaml)
-bunx --bun manifest-cli folder add <dir_path> [--label "<Name>"]
-bunx --bun manifest-cli folder list
-bunx --bun manifest-cli folder remove <dir_path>
+manifest-cli folder add <dir_path> [--label "<Name>"]
+manifest-cli folder list
+manifest-cli folder remove <dir_path>
 ```
 
 ---
@@ -61,13 +62,19 @@ bunx --bun manifest-cli folder remove <dir_path>
    - **If a configuration file already exists**: Edit the **existing** defining file in place (if the target symbol comes from a module file such as `.dashboard/modules/01-ops.yaml`, edit that module file directly; otherwise edit the existing override or `<unit_dir>/.dashboard/manifest.yaml`). **NEVER overwrite or flatten an existing manifest from scratch**—use targeted `Edit` operations.
    - **If no configuration file exists yet (Layer 0 Zero-Config)**: Create **`<unit_dir>/.dashboard/manifest.yaml`** (and optional `.dashboard/views/*.html` or `.dashboard/modules/*.yaml`).
 2. **Mandatory 3-Tier Validation**:
-   - Always run `bunx --bun manifest-cli validate <unit_id>` after creating or editing any manifest or module file until L1 (Zod schema), L2 (cross-file references & cycles), and L3 (TS/Python syntax, `prelude: true`, and `fromStdout` regexes) pass with `0` errors.
+   - Always run `manifest-cli validate <unit_id>` (or `{{manifest_cli}} validate <unit_id>`) after creating or editing any manifest or module file until L1 (Zod schema), L2 (cross-file references & cycles), and L3 (TS/Python syntax, `prelude: true`, and `fromStdout` regexes) pass with `0` errors.
 3. **Never Pollute `{{skill_dir}}` or `/tmp` with Runtime Outputs**:
    - Always write persistent state/backups to **`{{data_dir}}`** (`$SD_DATA_DIR` $\rightarrow$ `~/.local/share/skill-dashboard/units/<id>`), caches to **`{{cache_dir}}`** (`$SD_CACHE_DIR`), and per-run reports/exports to **`{{artifacts_dir}}`** (`$SD_ARTIFACTS_DIR` $\rightarrow$ `~/.local/share/skill-dashboard/artifacts/<id>/<run_id>`).
 4. **Clean Multi-Line Scripts (`script: |`)**:
    - Never chain multi-line shell commands with `&& \`. Use `script: |` block scalars; the engine executes multi-line scripts in `~/.cache/skill-dashboard/runtime/scripts/sd-script-<runId>.sh` with `#!/bin/zsh` and `set -e` enabled automatically.
 5. **Explicit `prelude: true` for TypeScript Data Nodes**:
    - Whenever authoring `runtime: ts` or `transform: ts` blocks that use `fs`, `path`, `os`, `Database`, `YAML`, or `$`, explicitly set `prelude: true` on the node (or `tsPrelude: true` at the manifest root).
+6. **Explicit `intermediate: true` Upstream DAG Nodes & `category` Grouping (No Duplicate Expensive Commands)**:
+   - When multiple UI widgets (e.g. a `kv` summary card and a `table` detail card) derive from the same expensive CLI/Python/DB query, **never duplicate the shell command across multiple nodes**. Declare **1 upstream `intermediate: true` source node** + **N downstream `runtime: ts` view nodes** (`sync.dependsOn: ["<upstream_id>"]` reading `ctx.data["<upstream_id>"]`), and group related nodes with `category: "1. Domain Name"`.
+7. **Clean Raw Field Bindings for `rowActions` / `bulkActions` (In-Place Audit Ready)**:
+   - Clicking any `rowAction`, `bulkAction`, `quickAction`, or `cellAction` opens the **In-Place Bound Action Audit & Execution Modal (`BoundActionInspectorModal`)** showing the exact `Form Key` $\leftarrow$ `YAML Template` $\leftarrow$ `Resolved Value` mapping. If a table formats a display column (e.g. `doc_id: "#597"`), also include a clean raw field in each row object (e.g. `raw_doc_id: "597"`) and bind `args: { doc_id: "{{row.raw_doc_id}}" }` so CLI commands receive clean values, and ensure every `args` key matches a `form` field key on the target `ActionItem`.
+8. **Two-Tier Execution Environment (`defaultWorkspace` Preference vs Per-Command `cwd` / `python` / `envFile` / `env`)**:
+   - Top-level `defaultWorkspace` (supports `~/...`, absolute paths, or paths relative to the skill directory such as `"../.."`) and `envVars` define the skill's default preference; individual `ActionItem`s and `DataNode`s targeting another microservice, repo, or `.env` file can declare their own `cwd`, `python`, `envFile`, and `env` (auto-detecting `.venv/bin/python` from the command's own `cwd` first, and editable in UI via `⚙️ Env`).
 
 ---
 
@@ -93,6 +100,7 @@ bunx --bun manifest-cli folder remove <dir_path>
 - **`{{python}}`**: Auto-detects nearest `.venv/bin/python` from the command's own resolved `cwd` first (walking up to 4 parent dirs), before falling back to `<effectiveWorkspace>/.venv/bin/python` or `python3`.
 - **`{{skill_dir}}`**: Canonical absolute path of the unit directory.
 - **`{{project_root}}`**: Bound `effectiveWorkspace` (skill default preference).
+- **`{{dashboard_root}}`** & **`{{manifest_cli}}`**: Engine repository root and `bun <dashboard_root>/src/manifest-cli.ts` CLI runner.
 - **`{{data_dir}}`** (`$SD_DATA_DIR`), **`{{cache_dir}}`** (`$SD_CACHE_DIR`), **`{{artifacts_dir}}`** (`$SD_ARTIFACTS_DIR`).
 - **`{{context.<key>}}`** & **`{{data.<nodeId>.*}}`**.
 - **`{{form.<key>}}`**:

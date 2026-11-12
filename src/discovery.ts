@@ -16,7 +16,11 @@ import {
 import { tmpdir } from "os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { resolveSkillCascade } from "./cascade.ts";
-import { resolvePythonExecutable, shellEscape } from "./interpolator.ts";
+import {
+  DASHBOARD_ENGINE_ROOT,
+  resolvePythonExecutable,
+  shellEscape,
+} from "./interpolator.ts";
 import type {
   AgentFixTarget,
   AgentManifestSyncRequest,
@@ -176,10 +180,35 @@ export function loadLockProvenanceMap(lockfiles: string[]): Record<string, LockP
   return map;
 }
 
-export function expandHomePath(p: string, homeDir: string): string {
+export function expandHomePath(p: string, homeDir: string, baseDir?: string): string {
   if (p.startsWith("~/")) return join(homeDir, p.slice(2));
   if (p === "~") return homeDir;
+  if (baseDir && !isAbsolute(p)) return resolve(baseDir, p);
   return resolve(p);
+}
+
+function resolveManifestDefaultWorkspace(
+  skillId: string,
+  rawDefaultWs: string | undefined,
+  homeDir: string,
+  realPath: string
+): string | undefined {
+  if (!rawDefaultWs) {
+    if (skillId === "skill-dashboard" && existsSync(join(DASHBOARD_ENGINE_ROOT, "package.json"))) {
+      return DASHBOARD_ENGINE_ROOT;
+    }
+    return undefined;
+  }
+  const expanded = expandHomePath(rawDefaultWs, homeDir, realPath);
+  if (skillId === "skill-dashboard") {
+    if (existsSync(expanded) && existsSync(join(expanded, "package.json"))) {
+      return expanded;
+    }
+    if (existsSync(join(DASHBOARD_ENGINE_ROOT, "package.json"))) {
+      return DASHBOARD_ENGINE_ROOT;
+    }
+  }
+  return existsSync(expanded) ? expanded : undefined;
 }
 
 export function discoverCanonicalSkills(options: {
@@ -271,13 +300,16 @@ export function discoverCanonicalSkills(options: {
         );
 
         const dbWsOverride = options.getSkillWorkspaceOverride?.(id);
-        const manifestDefaultWs = initialCascade.manifest.defaultWorkspace
-          ? expandHomePath(initialCascade.manifest.defaultWorkspace, options.homeDir)
-          : undefined;
+        const manifestDefaultWs = resolveManifestDefaultWorkspace(
+          id,
+          initialCascade.manifest.defaultWorkspace,
+          options.homeDir,
+          realPath
+        );
 
         const effectiveWorkspace =
           (dbWsOverride && existsSync(dbWsOverride) ? dbWsOverride : undefined) ||
-          (manifestDefaultWs && existsSync(manifestDefaultWs) ? manifestDefaultWs : undefined) ||
+          manifestDefaultWs ||
           options.activeWorkspace;
 
         // Re-evaluate cascade if effectiveWorkspace differs from global activeWorkspace (for Layer 3 override)
@@ -425,12 +457,15 @@ export function discoverCanonicalSkills(options: {
     usedIds.add(id);
 
     const dbWsOverride = options.getSkillWorkspaceOverride?.(id);
-    const manifestDefaultWs = initialProbe.manifest.defaultWorkspace
-      ? expandHomePath(initialProbe.manifest.defaultWorkspace, options.homeDir)
-      : undefined;
+    const manifestDefaultWs = resolveManifestDefaultWorkspace(
+      id,
+      initialProbe.manifest.defaultWorkspace,
+      options.homeDir,
+      realPath
+    );
     const effectiveWorkspace =
       (dbWsOverride && existsSync(dbWsOverride) ? dbWsOverride : undefined) ||
-      (manifestDefaultWs && existsSync(manifestDefaultWs) ? manifestDefaultWs : undefined) ||
+      manifestDefaultWs ||
       params.fallbackWorkspace ||
       realPath;
 
@@ -981,7 +1016,10 @@ export function buildAgentManifestSyncPrompt(
       ? readmePath
       : skill.canonicalPath;
   const cliPath = resolve(import.meta.dir, "manifest-cli.ts");
-  const skillGuidePath = resolve(import.meta.dir, "../SKILL.md");
+  const candidateGuideSubdir = resolve(import.meta.dir, "../skills/skill-dashboard/SKILL.md");
+  const skillGuidePath = existsSync(candidateGuideSubdir)
+    ? candidateGuideSubdir
+    : join(skill.canonicalPath, "SKILL.md");
   const mode: "init" | "incremental" = targetExists ? "incremental" : "init";
 
   const sections: string[] = [];
@@ -1021,11 +1059,11 @@ export function buildAgentManifestSyncPrompt(
 
   if (targetExists) {
     sections.push(
-      `Workflow:\n1. Read ${skillGuidePath} (and its references/ docs if needed) and run \`bun ${cliPath} inspect ${shellEscape(skill.canonicalPath)}\` and \`bun ${cliPath} map ${shellEscape(skill.id)}\`.\n2. Using the skill-dashboard Incremental Edit Protocol, update ${resolvedTargetFile} (context switchers, polyglot data nodes with prelude: true for runtime: ts, shape: scalar|kv|list|table|matrix|stream|raw, rowActions, actions supporting {{data_dir}}/{{cache_dir}}/{{artifacts_dir}} and artifacts rules, form fields with fromData, or views) to fulfill the User Goal and fix the Pinned UI Context Targets.\n3. Verify with \`bun ${cliPath} validate ${shellEscape(skill.id)}\` until 0 errors remain.`
+      `Workflow:\n1. Read ${skillGuidePath} (and its references/01..04-*.md docs if needed) and run \`bun ${cliPath} inspect ${shellEscape(skill.canonicalPath)}\` and \`bun ${cliPath} map ${shellEscape(skill.id)}\`.\n2. Using the skill-dashboard Incremental Edit Protocol, update ${resolvedTargetFile} (context switchers, polyglot data nodes with category tags, intermediate: true upstream DAG source nodes, prelude: true for runtime: ts, shape: scalar|kv|list|table|matrix|stream|raw, rowActions with clean raw column values, actions supporting per-command cwd/python/envFile/env and {{data_dir}}/{{cache_dir}}/{{artifacts_dir}} + artifacts rules, form fields with fromData, or views) to fulfill the User Goal and fix the Pinned UI Context Targets.\n3. Verify with \`bun ${cliPath} validate ${shellEscape(skill.id)}\` until 0 errors remain.`
     );
   } else {
     sections.push(
-      `Workflow:\n1. Read ${skillGuidePath} (and its references/ docs if needed) and run \`bun ${cliPath} inspect ${shellEscape(skill.canonicalPath)}\` and \`bun ${cliPath} init ${shellEscape(skill.canonicalPath)}\`.\n2. Create a structured ${resolvedTargetFile} following the skill-dashboard Reactive 2.0 SkillManifest schema (context switchers, polyglot data nodes with prelude: true for runtime: ts, actionGroups with subgroup tags, {{data_dir}}/{{cache_dir}}/{{artifacts_dir}} variables, artifacts rules, and views) fulfilling the User Goal.\n3. Verify with \`bun ${cliPath} validate ${shellEscape(skill.id)}\` until 0 errors remain.`
+      `Workflow:\n1. Read ${skillGuidePath} (and its references/01..04-*.md docs if needed) and run \`bun ${cliPath} inspect ${shellEscape(skill.canonicalPath)}\` and \`bun ${cliPath} init ${shellEscape(skill.canonicalPath)}\`.\n2. Create a structured ${resolvedTargetFile} following the skill-dashboard Reactive 2.0 SkillManifest schema (context switchers, polyglot data nodes with category tags, intermediate: true upstream DAG source nodes, prelude: true for runtime: ts, rowActions with clean raw column values, actionGroups with subgroup tags, per-command cwd/python/envFile/env, {{data_dir}}/{{cache_dir}}/{{artifacts_dir}} variables, artifacts rules, and views) fulfilling the User Goal.\n3. Verify with \`bun ${cliPath} validate ${shellEscape(skill.id)}\` until 0 errors remain.`
     );
   }
 

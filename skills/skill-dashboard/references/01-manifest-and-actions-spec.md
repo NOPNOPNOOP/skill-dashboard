@@ -106,6 +106,8 @@ All `command`, `script`, `DataNode.command`, and `ArtifactRule.path` strings sup
 | `{{python}}` | — | Nearest `.venv/bin/python` detected from the command's own resolved `cwd` first (walking up to 4 parent dirs), falling back to `<effectiveWorkspace>/.venv/bin/python` or `python3`. |
 | `{{skill_dir}}` | `$SKILL_DIR` | Canonical physical directory of the unit (e.g. `~/.agents/skills/vsip`). |
 | `{{project_root}}` | — | Bound `effectiveWorkspace` directory. |
+| `{{dashboard_root}}` | — | Canonical root directory of the running Skill Dashboard Studio engine. |
+| `{{manifest_cli}}` | — | `bun <dashboard_root>/src/manifest-cli.ts` — invokes the built-in manifest symbol graph & validator CLI without requiring global PATH or `bunx` resolution. |
 | `{{data_dir}}` | `$SD_DATA_DIR` | `~/.local/share/skill-dashboard/units/<unit_id>` — persistent per-unit storage for backups, SQLite DBs, and state files. |
 | `{{cache_dir}}` | `$SD_CACHE_DIR` | `~/.cache/skill-dashboard/units/<unit_id>` — disposable per-unit cache directory. |
 | `{{artifacts_dir}}` | `$SD_ARTIFACTS_DIR` | `~/.local/share/skill-dashboard/artifacts/<unit_id>/<run_id>` during execution (and `.../latest` symlink during preview). Any file written here is automatically collected as a run artifact! |

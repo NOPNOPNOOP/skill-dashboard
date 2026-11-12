@@ -9,6 +9,9 @@ import type {
   ResolvedCommandEnvSummary,
 } from "./types.ts";
 
+export const DASHBOARD_ENGINE_ROOT = resolve(import.meta.dir, "..");
+export const MANIFEST_CLI_PATH = resolve(import.meta.dir, "manifest-cli.ts");
+
 export function shellEscape(val: string): string {
   if (val === "") return "''";
   if (/^[a-zA-Z0-9_./:@=-]+$/.test(val)) {
@@ -502,6 +505,8 @@ export function interpolateActionCommand(params: {
     return val
       .replace(/\{\{\s*skill_dir\s*\}\}/g, skillDir)
       .replace(/\{\{\s*project_root\s*\}\}/g, activeWorkspace)
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, DASHBOARD_ENGINE_ROOT)
+      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${MANIFEST_CLI_PATH}`)
       .replace(/\{\{\s*data_dir\s*\}\}/g, dataDir)
       .replace(/\{\{\s*cache_dir\s*\}\}/g, cacheDir)
       .replace(/\{\{\s*artifacts_dir\s*\}\}/g, artifactsDir);
@@ -608,6 +613,8 @@ export function interpolateActionCommand(params: {
     let res = raw
       .replace(/\{\{\s*skill_dir\s*\}\}/g, skillDir)
       .replace(/\{\{\s*project_root\s*\}\}/g, baseCwd || activeWorkspace)
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, DASHBOARD_ENGINE_ROOT)
+      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${MANIFEST_CLI_PATH}`)
       .replace(/\{\{\s*data_dir\s*\}\}/g, dataDir)
       .replace(/\{\{\s*cache_dir\s*\}\}/g, cacheDir)
       .replace(/\{\{\s*artifacts_dir\s*\}\}/g, artifactsDir);
@@ -669,6 +676,14 @@ export function interpolateActionCommand(params: {
       )
       .replace(/\{\{\s*project_root\s*\}\}/g, (_m, offset, str) =>
         escapeForTemplateOffset(str, offset, activeWorkspace)
+      )
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, (_m, offset, str) =>
+        escapeForTemplateOffset(str, offset, DASHBOARD_ENGINE_ROOT)
+      )
+      .replace(/\{\{\s*manifest_cli\s*\}\}/g, (_m, offset, str) =>
+        isOffsetInsideDoubleQuotes(str, offset)
+          ? `bun ${escapeForTemplateOffset(str, offset, MANIFEST_CLI_PATH)}`
+          : `bun ${shellEscape(MANIFEST_CLI_PATH)}`
       )
       .replace(/\{\{\s*data_dir\s*\}\}/g, (_m, offset, str) =>
         dataDir ? escapeForTemplateOffset(str, offset, dataDir) : ""

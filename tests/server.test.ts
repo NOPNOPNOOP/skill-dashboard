@@ -2577,4 +2577,122 @@ actionGroups:
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });
+
+  test("17. Self-Hosted skill-dashboard Dogfooding (category, intermediate: true, {{manifest_cli}}, relative defaultWorkspace) & Agent Sync Prompt Integrity", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-test-17-"));
+    const agentsDir = join(tmpBase, "agents");
+    mkdirSync(agentsDir, { recursive: true });
+
+    // Symlink the real skills/skill-dashboard into our isolated test agentsDir
+    const realSkillSubdir = resolve(process.cwd(), "skills/skill-dashboard");
+    symlinkSync(realSkillSubdir, join(agentsDir, "skill-dashboard"));
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: tmpBase,
+      homeDir: tmpBase,
+    });
+
+    try {
+      // 1. Verify skill-dashboard's relative defaultWorkspace ("../..") resolves to the engine repository root
+      const bootRes = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+      const selfSkill = bootRes.skills.find((s: any) => s.id === "skill-dashboard");
+      expect(selfSkill).toBeDefined();
+      expect(existsSync(join(selfSkill.effectiveWorkspace, "package.json"))).toBe(true);
+      expect(existsSync(join(selfSkill.effectiveWorkspace, "src/manifest-cli.ts"))).toBe(true);
+
+      // 2. Verify buildAgentManifestSyncPrompt (POST /api/skills/skill-dashboard/agent-sync with previewOnly: true)
+      const syncRes = (await (
+        await fetch(`${srv.url}/api/skills/skill-dashboard/agent-sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            previewOnly: true,
+            userInstruction: "Verify agent guidance prompt",
+          }),
+        })
+      ).json()) as any;
+
+      const readMatch = syncRes.prompt.match(/Read\s+([^\s]+)\s+/);
+      expect(readMatch).not.toBeNull();
+      const guidePath = readMatch[1];
+      expect(existsSync(guidePath)).toBe(true);
+      expect(syncRes.prompt).toContain("intermediate: true");
+      expect(syncRes.prompt).toContain("category");
+      expect(syncRes.prompt).toContain("cwd");
+
+      // 3. Verify all DataNodes of skill-dashboard evaluate with status === "ready", category tags, and intermediate: true DAG node
+      const dataRes = (await (
+        await fetch(`${srv.url}/api/skills/skill-dashboard/data`)
+      ).json()) as any;
+      const snaps = dataRes.snapshots;
+
+      expect(snaps["ecosystem-health"].status).toBe("ready");
+      expect(snaps["ecosystem-health"].category).toBe("1. Service & Runtime");
+      expect(snaps["ecosystem-health"].resolvedSource).toContain("src/manifest-cli.ts");
+
+      expect(snaps["service-telemetry"].status).toBe("ready");
+      expect(snaps["service-telemetry"].category).toBe("1. Service & Runtime");
+
+      expect(snaps["recent-runs-table"].status).toBe("ready");
+      expect(snaps["recent-runs-table"].category).toBe("1. Service & Runtime");
+
+      expect(snaps["skills-catalog-raw"]).toBeDefined();
+      expect(snaps["skills-catalog-raw"].status).toBe("ready");
+      expect(snaps["skills-catalog-raw"].intermediate).toBe(true);
+      expect(snaps["skills-catalog-raw"].category).toBe("2. Skills & Ecosystem");
+      expect(snaps["skills-catalog-raw"].consumedBy).toContain("data:skills-catalog-table");
+      expect(snaps["skills-catalog-raw"].consumedBy).toContain("data:studio-coverage-kpi");
+
+      expect(snaps["skills-catalog-table"].status).toBe("ready");
+      expect(snaps["skills-catalog-table"].category).toBe("2. Skills & Ecosystem");
+      expect(snaps["studio-coverage-kpi"].status).toBe("ready");
+      expect(snaps["studio-coverage-kpi"].category).toBe("2. Skills & Ecosystem");
+
+      // 4. Verify build-ui and manifest-cli-map actions preview with valid repo root cwd and {{manifest_cli}} expansion
+      const prevBuild = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "skill-dashboard",
+            actionId: "build-ui",
+            formValues: {},
+          }),
+        })
+      ).json()) as any;
+      expect(existsSync(join(prevBuild.cwd, "package.json"))).toBe(true);
+
+      const prevMap = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "skill-dashboard",
+            actionId: "manifest-cli-map",
+            formValues: { skill_id: "skill-dashboard" },
+          }),
+        })
+      ).json()) as any;
+      expect(prevMap.maskedCommand).toContain("src/manifest-cli.ts map skill-dashboard");
+
+      // 5. Verify SKILL.md and references/01..04-*.md have no stale ~/.agents/skills/skill-dashboard/src/ paths
+      const ref04 = readFileSync(
+        join(realSkillSubdir, "references/04-agent-hitl-scratchpads-and-modular-cli.md"),
+        "utf-8"
+      );
+      expect(ref04).not.toContain("~/.agents/skills/skill-dashboard/src/");
+      const skillMd = readFileSync(join(realSkillSubdir, "SKILL.md"), "utf-8");
+      expect(skillMd).toContain("intermediate: true");
+      expect(skillMd).toContain("{{manifest_cli}}");
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
 });
