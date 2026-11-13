@@ -18,6 +18,7 @@ import type {
   ContextField,
   DataNode,
   DataSnapshot,
+  ManifestSymbolProvenance,
 } from "../types.ts";
 import { ActionCard } from "./ActionCard.tsx";
 import { StatusProbesBar } from "./StatusProbesBar.tsx";
@@ -31,6 +32,7 @@ interface MultiLevelPlaygroundProps {
   refreshTrigger: number;
   prefillRequest: { actionId: string; formValues: Record<string, unknown>; seq: number } | null;
   commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  skillProvenance?: ManifestSymbolProvenance;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onPrefillJump: (actionId: string, formValues: Record<string, unknown>) => void;
   onContextChanged?: () => void;
@@ -54,6 +56,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   refreshTrigger,
   prefillRequest,
   commandEnvOverrides,
+  skillProvenance,
   onSkillUpdated,
   onPrefillJump,
   onContextChanged,
@@ -226,6 +229,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                 }
                 uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
                 dataSnapshots={sharedSnapshots}
+                dataNodes={dataNodes}
+                actionProvenance={skillProvenance?.actionSource?.[action.id]}
                 onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
                 onSkillUpdated={onSkillUpdated}
                 onExecute={onExecute}
@@ -412,6 +417,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                               }
                               uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
                               dataSnapshots={sharedSnapshots}
+                              dataNodes={dataNodes}
+                              actionProvenance={skillProvenance?.actionSource?.[action.id]}
                               onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
                               onSkillUpdated={onSkillUpdated}
                               onExecute={onExecute}
@@ -548,6 +555,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                                       }
                                       uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
                                       dataSnapshots={sharedSnapshots}
+                                      dataNodes={dataNodes}
+                                      actionProvenance={skillProvenance?.actionSource?.[action.id]}
                                       onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
                                       onSkillUpdated={onSkillUpdated}
                                       onExecute={onExecute}

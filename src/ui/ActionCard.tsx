@@ -1,21 +1,27 @@
 import {
   AlertTriangle,
   Check,
+  Code2,
   Copy,
+  Database,
   ExternalLink,
+  Eye,
   FolderOpen,
   Play,
   RefreshCw,
   ShieldAlert,
   Sparkles,
   Terminal,
+  X,
 } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { evaluateActionPrecondition } from "../interpolator.ts";
 import type {
   ActionItem,
+  BoundActionTrigger,
   CanonicalSkill,
   CommandEnvConfig,
+  DataNode,
   DataSnapshot,
   FormField,
   ResolvedCommandEnvSummary,
@@ -31,6 +37,8 @@ interface ActionCardProps {
   prefillValues?: Record<string, unknown> | null;
   uiEnvOverride?: CommandEnvConfig;
   dataSnapshots?: Record<string, DataSnapshot | undefined>;
+  dataNodes?: DataNode[];
+  actionProvenance?: string;
   inAuditModal?: boolean;
   onExecuted?: () => void;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
@@ -57,6 +65,8 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   prefillValues,
   uiEnvOverride,
   dataSnapshots = {},
+  dataNodes = [],
+  actionProvenance,
   inAuditModal = false,
   onExecuted,
   onSkillUpdated,
@@ -199,7 +209,46 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   const [previewCwd, setPreviewCwd] = useState<string>(activeWorkspace);
   const [resolvedEnv, setResolvedEnv] = useState<ResolvedCommandEnvSummary | null>(null);
   const [envPanelOpen, setEnvPanelOpen] = useState(false);
+  const [inspectOpen, setInspectOpen] = useState(false);
+  const [inspectTab, setInspectTab] = useState<"template" | "bindings" | "raw">("template");
+  const [copiedInspect, setCopiedInspect] = useState(false);
   const [copiedMode, setCopiedMode] = useState<"cmd" | "prompt" | null>(null);
+
+  const upstreamBoundTriggers = useMemo(() => {
+    const list: Array<{
+      nodeId: string;
+      nodeTitle: string;
+      kind: string;
+      trigger: BoundActionTrigger;
+    }> = [];
+    for (const dn of dataNodes || []) {
+      for (const t of dn.quickActions || []) {
+        if (t.actionId === action.id)
+          list.push({ nodeId: dn.id, nodeTitle: dn.title, kind: "Quick Action", trigger: t });
+      }
+      for (const t of dn.rowActions || []) {
+        if (t.actionId === action.id)
+          list.push({ nodeId: dn.id, nodeTitle: dn.title, kind: "Row Action", trigger: t });
+      }
+      for (const t of dn.bulkActions || []) {
+        if (t.actionId === action.id)
+          list.push({ nodeId: dn.id, nodeTitle: dn.title, kind: "Bulk Action", trigger: t });
+      }
+      for (const t of dn.nodeActions || []) {
+        if (t.actionId === action.id)
+          list.push({ nodeId: dn.id, nodeTitle: dn.title, kind: "Node Action", trigger: t });
+      }
+      if (dn.cellAction && dn.cellAction.actionId === action.id) {
+        list.push({
+          nodeId: dn.id,
+          nodeTitle: dn.title,
+          kind: "Cell Action",
+          trigger: dn.cellAction,
+        });
+      }
+    }
+    return list;
+  }, [dataNodes, action.id]);
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [dangerConfirmInput, setDangerConfirmInput] = useState("");
   const [pendingRunner, setPendingRunner] = useState<{
@@ -405,41 +454,212 @@ export const ActionCard: React.FC<ActionCardProps> = ({
 
         <button
           type="button"
-          onClick={() => setEnvPanelOpen((prev) => !prev)}
+          onClick={() => setInspectOpen((prev) => !prev)}
           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold transition-all border shrink-0 ${
-            isCustomEnv
-              ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-sm"
+            inspectOpen
+              ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40 shadow-sm"
               : "st-btn-secondary border-transparent"
           }`}
-          title={`cwd: ${previewCwd}, python: ${resolvedEnv?.python || "auto"}`}
+          title="White-box inspect Action template, provenance, form & DataNode bindings"
         >
-          <span>⚙️ {customBadgeText}</span>
+          <Eye className="w-3.5 h-3.5 text-sky-500" />
+          <span>Inspect</span>
         </button>
       </div>
 
-      {/* Inline Command Execution Environment Editor */}
-      {envPanelOpen && (
-        <CommandEnvEditor
-          skillId={skillId}
-          targetKind="action"
-          targetId={action.id}
-          targetTitle={action.title}
-          defaultWorkspace={activeWorkspace}
-          initialConfig={{
-            cwd: action.cwd,
-            python: action.python,
-            envFile: action.envFile,
-            env: action.env,
-            ...uiEnvOverride,
-          }}
-          resolvedSummary={resolvedEnv}
-          onSaved={(result) => {
-            if (result.skill) {
-              onSkillUpdated?.(result.skill);
-            }
-          }}
-          onClose={() => setEnvPanelOpen(false)}
-        />
+      {/* White-Box Action Inspector Panel (Template & Provenance / Form & Data Bindings / Raw Declaration) */}
+      {inspectOpen && (
+        <div className="st-subcard rounded-xl border border-sky-500/30 p-3.5 flex flex-col gap-3 text-xs">
+          <div className="flex items-center justify-between gap-2 flex-wrap border-b st-border pb-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setInspectTab("template")}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                  inspectTab === "template" ? "bg-sky-600 text-white" : "st-btn-secondary"
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5" />
+                <span>Template & Provenance</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setInspectTab("bindings")}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                  inspectTab === "bindings" ? "bg-sky-600 text-white" : "st-btn-secondary"
+                }`}
+              >
+                <Database className="w-3.5 h-3.5" />
+                <span>
+                  Form & Data Bindings ({(action.form?.length || 0) + upstreamBoundTriggers.length})
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setInspectTab("raw")}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                  inspectTab === "raw" ? "bg-sky-600 text-white" : "st-btn-secondary"
+                }`}
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                <span>Raw Declaration</span>
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInspectOpen(false)}
+              className="p-1 rounded-lg st-btn-secondary"
+              title="Close Action Inspector"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {inspectTab === "template" && (
+            <div className="flex flex-col gap-2.5">
+              <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+                <span className="px-2 py-0.5 rounded st-pill">id: {action.id}</span>
+                {actionProvenance && (
+                  <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30">
+                    source: {actionProvenance}
+                  </span>
+                )}
+                <span className="px-2 py-0.5 rounded st-pill">
+                  danger: {action.danger || "safe"}
+                </span>
+                <span className="px-2 py-0.5 rounded st-pill">
+                  cwd: {action.cwd || "project_root"}
+                </span>
+                {action.output?.intoData && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
+                    intoData ➔ {action.output.intoData}
+                  </span>
+                )}
+              </div>
+              <div className="st-code-surface rounded-xl border st-border p-3 font-mono text-xs overflow-x-auto">
+                <div className="text-[10.5px] st-text-muted mb-1">
+                  Raw YAML {action.script ? "Multi-Line Script (`script: |`)" : "Command Template (`command`)"}:
+                </div>
+                <pre className="whitespace-pre-wrap break-all select-all leading-relaxed">
+                  {action.script || action.command}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {inspectTab === "bindings" && (
+            <div className="flex flex-col gap-3">
+              <div>
+                <div className="text-[11px] font-bold st-text-primary mb-1.5">
+                  Form Fields ({action.form?.length || 0})
+                </div>
+                {action.form && action.form.length > 0 ? (
+                  <div className="overflow-x-auto rounded-lg border st-border">
+                    <table className="w-full text-left border-collapse text-[11.5px]">
+                      <thead>
+                        <tr className="border-b st-border st-surface-muted st-text-muted">
+                          <th className="py-1.5 px-2.5">Key</th>
+                          <th className="py-1.5 px-2.5">Type</th>
+                          <th className="py-1.5 px-2.5">Flag / Positional</th>
+                          <th className="py-1.5 px-2.5">Default</th>
+                          <th className="py-1.5 px-2.5">Data Source (`fromData`)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y st-border font-mono">
+                        {action.form.map((f) => (
+                          <tr key={f.key}>
+                            <td className="py-1.5 px-2.5 font-bold text-sky-600 dark:text-sky-400">
+                              {f.key}
+                              {f.required ? " *" : ""}
+                            </td>
+                            <td className="py-1.5 px-2.5">{f.type}</td>
+                            <td className="py-1.5 px-2.5">
+                              {f.positional ? "positional" : f.flag || `--${f.key}`}
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              {f.default !== undefined ? String(f.default) : "—"}
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              {f.fromData ? (
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
+                                  data:{f.fromData}
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-xs st-text-muted italic">No form parameters declared.</div>
+                )}
+              </div>
+
+              <div>
+                <div className="text-[11px] font-bold st-text-primary mb-1.5">
+                  Upstream DataNode Bound Triggers ({upstreamBoundTriggers.length})
+                </div>
+                {upstreamBoundTriggers.length > 0 ? (
+                  <div className="flex flex-col gap-1.5">
+                    {upstreamBoundTriggers.map((ub, i) => (
+                      <div
+                        key={i}
+                        className="px-2.5 py-1.5 rounded-lg st-code-surface border st-border flex items-center justify-between gap-2 flex-wrap font-mono text-[11px]"
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 font-semibold">
+                            data:{ub.nodeId}
+                          </span>
+                          <span className="st-text-muted">({ub.kind})</span>
+                          <span className="font-bold st-text-primary">"{ub.trigger.label}"</span>
+                        </div>
+                        <code className="st-text-secondary">
+                          args: {JSON.stringify(ub.trigger.args || {})}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs st-text-muted italic">
+                    No DataNode triggers reference this action.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {inspectTab === "raw" && (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] st-text-muted font-mono">
+                  Normalized ActionItem Declaration (JSON):
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify(action, null, 2));
+                    setCopiedInspect(true);
+                    setTimeout(() => setCopiedInspect(false), 1500);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded st-btn-secondary font-semibold"
+                >
+                  {copiedInspect ? (
+                    <Check className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-3 h-3" />
+                  )}
+                  <span>{copiedInspect ? "Copied" : "Copy Declaration"}</span>
+                </button>
+              </div>
+              <pre className="st-code-surface rounded-xl border st-border p-3 font-mono text-[11px] max-h-56 overflow-y-auto whitespace-pre-wrap break-all">
+                {JSON.stringify(action, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Declarative Action Precondition Guards Banner */}
@@ -800,6 +1020,31 @@ export const ActionCard: React.FC<ActionCardProps> = ({
           )}
         </button>
       </div>
+
+      {/* Inline Command Execution Environment Editor (attached directly below the Command Preview Box) */}
+      {envPanelOpen && (
+        <CommandEnvEditor
+          skillId={skillId}
+          targetKind="action"
+          targetId={action.id}
+          targetTitle={action.title}
+          defaultWorkspace={activeWorkspace}
+          initialConfig={{
+            cwd: action.cwd,
+            python: action.python,
+            envFile: action.envFile,
+            env: action.env,
+            ...uiEnvOverride,
+          }}
+          resolvedSummary={resolvedEnv}
+          onSaved={(result) => {
+            if (result.skill) {
+              onSkillUpdated?.(result.skill);
+            }
+          }}
+          onClose={() => setEnvPanelOpen(false)}
+        />
+      )}
 
       {inAuditModal && (action.danger === "danger" || action.requiresHumanApprovalFlag) && (
         <div className="px-3.5 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col gap-2 text-xs">

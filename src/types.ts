@@ -251,6 +251,50 @@ export interface ResolvedCommandEnvSummary {
   badgeText: string;
 }
 
+export const DataPrimitiveSchema = z.enum(["Scalar", "Records", "Document", "Graph", "Raw"]);
+export type DataPrimitive = z.infer<typeof DataPrimitiveSchema>;
+
+export const MatrixPivotSchema = z.object({
+  rowKey: z.string(),
+  colKey: z.string().optional(),
+  valueKey: z.string().optional(),
+  colKeys: z.array(z.string()).optional(),
+  emptyValue: z.string().optional(),
+});
+
+export type MatrixPivot = z.infer<typeof MatrixPivotSchema>;
+
+export const TreeSpecSchema = z.object({
+  groupBy: z.array(z.string()).optional(),
+  labelKey: z.string().optional(),
+  metaKey: z.string().optional(),
+  valueKey: z.string().optional(),
+  childrenKey: z.string().optional(),
+  defaultExpandDepth: z.number().optional(),
+});
+
+export type TreeSpec = z.infer<typeof TreeSpecSchema>;
+
+export const ListSpecSchema = z.object({
+  labelKey: z.string().optional(),
+  metaKey: z.string().optional(),
+  valueKey: z.string().optional(),
+  toneKey: z.string().optional(),
+});
+
+export type ListSpec = z.infer<typeof ListSpecSchema>;
+
+export const GraphSpecSchema = z.object({
+  idKey: z.string().optional(),
+  labelKey: z.string().optional(),
+  groupKey: z.string().optional(),
+  metaKey: z.string().optional(),
+  dependsOnKey: z.string().optional(),
+  parentKey: z.string().optional(),
+});
+
+export type GraphSpec = z.infer<typeof GraphSpecSchema>;
+
 export const DataNodeSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -277,18 +321,16 @@ export const DataNodeSchema = z.object({
   parse: DataParserSchema.optional(),
   transform: DataTransformSchema.optional(),
   shape: DataShapeSchema.default("raw"),
+  views: z.array(DataShapeSchema).optional(),
   primaryKey: z.string().optional(),
   valueColumn: z.string().optional(),
   labelColumn: z.string().optional(),
   metaColumn: z.string().optional(),
   columns: z.array(TableColumnSchema).optional(),
-  pivot: z
-    .object({
-      rowKey: z.string(),
-      colKey: z.string(),
-      valueKey: z.string(),
-    })
-    .optional(),
+  pivot: MatrixPivotSchema.optional(),
+  treeSpec: TreeSpecSchema.optional(),
+  listSpec: ListSpecSchema.optional(),
+  graphSpec: GraphSpecSchema.optional(),
   selectContextKey: z.string().optional(),
   quickActions: z.array(BoundActionTriggerSchema).optional(),
   rowActions: z.array(BoundActionTriggerSchema).optional(),
@@ -496,6 +538,7 @@ export interface TreeNodeItem {
   path?: string;
   actionId?: string;
   args?: Record<string, unknown>;
+  rawRow?: Record<string, unknown>;
   children?: TreeNodeItem[];
 }
 
@@ -515,6 +558,7 @@ export interface GraphNodeItem {
   downstreamIds?: string[];
   actionId?: string;
   args?: Record<string, unknown>;
+  rawRow?: Record<string, unknown>;
 }
 
 export interface GraphEdgeItem {
@@ -534,7 +578,9 @@ export interface ListItem {
   value: string;
   label: string;
   meta?: string;
+  tone?: "neutral" | "info" | "success" | "warn" | "danger";
   raw?: unknown;
+  rawRow?: Record<string, unknown>;
 }
 
 export interface ListPayload {
@@ -551,6 +597,7 @@ export interface MatrixPayload {
   rowKeys: string[];
   colKeys: string[];
   cells: Record<string, Record<string, unknown>>;
+  rowRecordMap?: Record<string, Record<string, unknown>>;
 }
 
 export interface RawPayload {
@@ -565,6 +612,12 @@ export interface DataSnapshot {
   description?: string;
   category?: string;
   intermediate?: boolean;
+  primitive?: DataPrimitive;
+  views?: DataShape[];
+  pivot?: MatrixPivot;
+  treeSpec?: TreeSpec;
+  listSpec?: ListSpec;
+  graphSpec?: GraphSpec;
   rawParsed?: unknown;
   consumedBy?: string[];
   resolvedEnv?: ResolvedCommandEnvSummary;

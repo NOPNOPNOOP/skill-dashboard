@@ -158,6 +158,24 @@ Build **Skill Dashboard Studio** (`skill-dashboard`)—a fast, zero-external-dep
     - **Master-Detail Click Drill-Down (`selectContextKey`)**: Clicking a row in `table`, a pill in `list`, a node in `tree`, or a node in `graph` updates `context[selectContextKey]` (e.g. `focus_skill`) and cascades to filter downstream tables, trees, and graphs (clicking again resets to `"all"`);
     - **Action Data Precondition Guards (`preconditions:`)**: `ActionItem.preconditions` evaluates live `DataSnapshot` state (`equals`, `contains`, `minRows`) in `ActionCard` and `BoundActionInspectorModal`, surfacing a warning banner and one-click `fixActionId` button when unmet;
     - **Protected `passive` Node `intoData` Feedback Loop**: `ReactiveGraphEngine.invalidateSkill` preserves `runtime: "passive"` snapshots across global refreshes so `ActionItem.output.intoData` (e.g. `manifest-cli-map` writing into `last-symbol-map-output`) remains visible in the UI after PTY completion.
+84. As a skill author or developer inspecting data nodes, I want every `DataSnapshot` and UI card/navigator to explicitly surface its canonical **5-Primitive Type (`primitive: "Scalar" | "Records" | "Document" | "Graph" | "Raw"`)** alongside its active UI view (`Records ➔ TABLE`, `Document ➔ KV`, `Graph ➔ GRAPH`), and I want to be able to declare per-view projection rules directly on any `data:` node in `manifest.yaml`:
+    - **`columns:`** for `table` column labels, formatting, and badges;
+    - **`pivot:`** for `matrix` supporting both **Long-Table Pivot** (`{ rowKey, colKey, valueKey, emptyValue }`) and **Wide-Table Attribute Matrix** (`{ rowKey, colKeys: string[], emptyValue }`, auto-selected when `rowKey` is unique per row and `colKey` is omitted so wide tables never produce sparse `—` holes);
+    - **`treeSpec:`** for `tree` supporting **`groupBy: string[]`** (aggregating `Records` into multi-level directory trees with item counts), `labelKey`, `metaKey`, `valueKey`, and `defaultExpandDepth`;
+    - **`listSpec:`** for `list` supporting `labelKey`, `metaKey`, `valueKey`, and `toneKey`;
+    - **`graphSpec:`** for `graph` supporting `idKey`, `labelKey`, `groupKey`, `metaKey`, and `dependsOnKey` / `parentKey` (allowing `Records` with dependency fields to project directly into a layered topological graph);
+    - Optional **`views: DataShape[]`** whitelist to restrict which view switcher tabs appear on a card, while preserving `rawRow` across all projected views so `rowActions` (`{{row.*}}`), `nodeActions` (`{{node.*}}`), and `cellAction` (`{{cell.*}}`) work seamlessly across `Table ⇄ Matrix ⇄ List ⇄ Tree ⇄ Graph`.
+85. As a user triggering bound actions on a `DataNode` (`quickActions`, `rowActions`, `bulkActions`, `nodeActions`, `cellAction`), I want clean action button labels **without noisy `→ <actionId>` suffixes**, where **Left-Click (`onClick`)** executes the action immediately in the Web Terminal whenever `mode` is `"run"` (default), `danger === "safe"`, all required fields are satisfied, and no `preconditions` are failing (opening the configuration/approval modal only when `mode === "prefill"`, `danger` is `"warn" | "danger"`, required args are missing, or preconditions fail), while **Right-Click (`onContextMenu`)** always opens the **`BoundActionInspectorModal`** configuration and command preview panel on demand.
+86. As a user configuring command execution environments (`⚙️ Env`) or inspecting how an `ActionItem` is authored, I want:
+    - **Single Canonical `⚙️ Env` Location inside the Command Preview Box**: Remove the duplicate `⚙️ Env` button from the `ActionCard` title header and keep `⚙️ Env` consolidated inside the `Live Workspace-Resolved Command` preview bar header (and inside `DataNode`'s `Inspect -> Execution Source` command bar, showing only a compact status pill on the card header when a custom environment is active);
+    - **Markdown Runbook `⚙️ Env` Support**: Include the same `⚙️ Env` button on executable code block toolbars inside `MarkdownViewer.tsx` (`Knowledge & Docs`), backed by `CommandEnvEditor` (`targetKind: "action", targetId: "adhoc-runbook"`) and honored by both `/api/preview-command` and `/api/runs`;
+    - **`ActionCard` White-Box `🔍 Inspect` Panel**: Add a `🔍 Inspect` button in the `ActionCard` header that reveals (1) `Template & Provenance` (defining YAML module file from `layers.provenance.actionSource`, raw `command`/`script` template, `cwd`, `danger`, `output.intoData`), (2) `Form & Data Bindings` (table of `form` fields, `fromData` sources, `preconditions`, and reverse-indexed upstream `DataNode` bound triggers), and (3) `Raw Declaration` (formatted YAML/JSON with one-click copy).
+87. As a user browsing a skill with many heterogeneous `DataNode`s, I want the Data Panel to eliminate visual clutter through a **Two-Tier Ergonomic Layout**:
+    - **Top Compact `Scalar` KPI Strip**: Automatically extracts `primitive === "Scalar"` (`shape === "scalar"`) nodes into a compact single-row metric strip at the top;
+    - **3-Mode Data Workbench Switcher (`Split Focus` / `Accordion` / `Grid`)**:
+      - **`Split Focus` (Master-Detail Navigator + Pin Split-View)**: Left sidebar directory tree grouped by `category` (showing node title, `Primitive ➔ View` badge, row/item summary, and a **`📌 Pin`** toggle) + Right full-width active canvas that renders pinned node(s) alongside the focused node so Master-Detail (`selectContextKey`) interactions between an upstream table and downstream graph/tree/matrix can be operated side-by-side within a single viewport;
+      - **`Accordion` (High-Density Single-Line Rows)**: Collapses each `DataNode` into a single-line summary bar with inline quick actions, expanding on click;
+      - **`Grid` (Clean 2-Column Bounded Cards)**: Clean 2-column grid with bounded card body scroll (`max-h-80`) and decluttered headers.
 
 ---
 
@@ -322,6 +340,7 @@ export interface DataNode {
     code: string;
   };
   shape: "scalar" | "kv" | "list" | "table" | "matrix" | "tree" | "graph" | "stream" | "raw" | "auto";
+  views?: Array<"scalar" | "kv" | "list" | "table" | "matrix" | "tree" | "graph" | "raw">; // optional explicit view switcher whitelist
   primaryKey?: string;
   valueColumn?: string;
   labelColumn?: string;
@@ -331,7 +350,35 @@ export interface DataNode {
     label: string;
     type: "text" | "code" | "badge" | "bytes" | "datetime" | "progress" | "boolean" | "number";
   }>;
-  pivot?: { rowKey: string; colKey: string; valueKey: string };
+  pivot?: {
+    rowKey: string;
+    colKey?: string;      // Long-Table Pivot column dimension
+    valueKey?: string;    // Long-Table Pivot cell value field
+    colKeys?: string[];   // Wide-Table Attribute Matrix explicit columns
+    emptyValue?: string;
+  };
+  treeSpec?: {
+    groupBy?: string[];   // Multi-level directory grouping keys for Records -> Tree projection
+    labelKey?: string;
+    metaKey?: string;
+    valueKey?: string;
+    childrenKey?: string;
+    defaultExpandDepth?: number;
+  };
+  listSpec?: {
+    labelKey?: string;
+    metaKey?: string;
+    valueKey?: string;
+    toneKey?: string;
+  };
+  graphSpec?: {
+    idKey?: string;
+    labelKey?: string;
+    groupKey?: string;
+    metaKey?: string;
+    dependsOnKey?: string;
+    parentKey?: string;
+  };
   selectContextKey?: string;          // declarative master-detail context key updated on row/pill/tree/graph-node click
   quickActions?: BoundActionTrigger[];
   rowActions?: BoundActionTrigger[];
@@ -566,6 +613,10 @@ export interface AgentManifestSyncRequest {
    - Verifies that `shape: "tree"` recursively converts arbitrary nested JSON objects/arrays and explicit tree nodes into `TreePayload` (`{ roots: TreeNodeItem[] }`).
    - Verifies that `shape: "graph"` computes topological `layer`, `upstreamIds`, and `downstreamIds` for every node, projects nodes into `FormFieldOption[]`, and interpolates `{{node.id}}`, `{{node.upstreamIds}}`, and `{{node.downstreamIds}}` via `interpolateBoundTriggerArgs`.
    - Verifies that `ReactiveGraphEngine.invalidateSkill` preserves `runtime: "passive"` snapshots populated by `ActionItem.output.intoData` across global refreshes, and that `skill-dashboard`'s own `.dashboard/` dogfoods all canonical shapes (`scalar`, `kv`, `tree`, `table`, `matrix`, `list`, `graph`, `raw`/`passive`), multi-source SQLite + filesystem Join, `selectContextKey` master-detail filtering, and `ActionItem.preconditions`.
+15. **Explicit 5-Primitive Typing (`DataSnapshot.primitive`), Declarative Multi-View Projection Specs (`pivot` Wide/Long, `treeSpec.groupBy`, `listSpec`, `graphSpec`), Cross-View `rawRow` Action Inheritance, Left-Click Run / Right-Click Configure, Unified Command-Box `⚙️ Env` (with Markdown Runbook Support), Action `🔍 Inspect`, and 3-Mode Data Workbench Layout**:
+   - Verifies that `DataSnapshot.primitive` resolves accurately to `"Scalar" | "Records" | "Document" | "Graph" | "Raw"`.
+   - Verifies that `projectRecordsToMatrix` supports both Long-Table Pivot (`rowKey + colKey + valueKey`) and Wide-Table Attribute Matrix (`rowKey + colKeys` or automatic unique-rowKey detection), `projectRecordsToTree` groups records hierarchically via `treeSpec.groupBy`, and `projectRecordsToGraph` builds a topological graph from `graphSpec.dependsOnKey` / `parentKey`.
+   - Verifies that `interpolateBoundTriggerArgs` resolves `{{row.*}}`, `{{node.*}}`, and `{{cell.*}}` interchangeably via `rawRow` across all projected views, and that `/api/preview-command` and `/api/runs` honor `action:adhoc-runbook` command environment overrides set from Markdown executable blocks.
 
 ---
 

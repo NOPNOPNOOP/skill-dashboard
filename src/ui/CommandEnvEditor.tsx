@@ -346,15 +346,17 @@ export const CommandEnvEditor: React.FC<CommandEnvEditorProps> = ({
 
       {/* Checkboxes for Manifest and Default Workspace */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3 pt-2 border-t st-border flex-wrap">
-        <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={saveToManifest}
-            onChange={(e) => setSaveToManifest(e.target.checked)}
-            className="w-3.5 h-3.5 rounded accent-sky-600"
-          />
-          <span className="text-xs st-text-primary">Save to manifest.yaml</span>
-        </label>
+        {targetId !== "adhoc-runbook" && (
+          <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={saveToManifest}
+              onChange={(e) => setSaveToManifest(e.target.checked)}
+              className="w-3.5 h-3.5 rounded accent-sky-600"
+            />
+            <span className="text-xs st-text-primary">Save to manifest.yaml</span>
+          </label>
+        )}
 
         {Boolean(cwd.trim()) && (
           <label className="inline-flex items-center gap-2 cursor-pointer select-none">

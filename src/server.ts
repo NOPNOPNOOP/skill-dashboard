@@ -1021,8 +1021,8 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           const secretKeys = new Set(
             (skill.manifest.envVars || []).filter((e) => e.secret).map((e) => e.key)
           );
-          const uiEnvOverride = body.actionId
-            ? skill.commandEnvOverrides?.[`action:${body.actionId}`]
+          const uiEnvOverride = action.id
+            ? skill.commandEnvOverrides?.[`action:${action.id}`]
             : undefined;
           const preview = interpolateActionCommand({
             action,

@@ -15,7 +15,14 @@ import {
 } from "lucide-react";
 import { marked } from "marked";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { FormField, SkillView } from "../types.ts";
+import type {
+  CanonicalSkill,
+  CommandEnvConfig,
+  FormField,
+  ResolvedCommandEnvSummary,
+  SkillView,
+} from "../types.ts";
+import { CommandEnvEditor } from "./CommandEnvEditor.tsx";
 import { highlightCodeToHtml, splitMarkdownIntoSegments } from "./highlight.ts";
 
 interface InlineExecutableCommandRowProps {
@@ -23,6 +30,8 @@ interface InlineExecutableCommandRowProps {
   rawCommand: string;
   commentHint?: string;
   activeWorkspace: string;
+  uiEnvOverride?: CommandEnvConfig;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   onExecuteAdHoc: (params: {
     adHocCommand: string;
     adHocTitle: string;
@@ -38,11 +47,16 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
   rawCommand,
   commentHint,
   activeWorkspace,
+  uiEnvOverride,
+  onSkillUpdated,
   onExecuteAdHoc,
 }) => {
   const [inferredForm, setInferredForm] = useState<FormField[]>([]);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [resolvedPreview, setResolvedPreview] = useState<string>(rawCommand);
+  const [previewCwd, setPreviewCwd] = useState<string>(activeWorkspace);
+  const [resolvedEnv, setResolvedEnv] = useState<ResolvedCommandEnvSummary | null>(null);
+  const [envPanelOpen, setEnvPanelOpen] = useState<boolean>(false);
   const [paramsExpanded, setParamsExpanded] = useState<boolean>(false);
   const [copied, setCopied] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -75,12 +89,14 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
         setFormValues(initVals);
         if (hasRequired) setParamsExpanded(true);
         if (data.maskedCommand) setResolvedPreview(data.maskedCommand);
+        if (data.cwd) setPreviewCwd(data.cwd);
+        if (data.resolvedEnv) setResolvedEnv(data.resolvedEnv);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [skillId, rawCommand, activeWorkspace]);
+  }, [skillId, rawCommand, activeWorkspace, JSON.stringify(uiEnvOverride)]);
 
   // Update preview whenever formValues change
   useEffect(() => {
@@ -97,15 +113,17 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
     })
       .then((r) => r.json())
       .then((data) => {
-        if (!cancelled && data.maskedCommand) {
-          setResolvedPreview(data.maskedCommand);
+        if (!cancelled) {
+          if (data.maskedCommand) setResolvedPreview(data.maskedCommand);
+          if (data.cwd) setPreviewCwd(data.cwd);
+          if (data.resolvedEnv) setResolvedEnv(data.resolvedEnv);
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [skillId, rawCommand, formValues, activeWorkspace]);
+  }, [skillId, rawCommand, formValues, activeWorkspace, JSON.stringify(uiEnvOverride)]);
 
   const handleRun = async (
     runner: "web_terminal" | "external_terminal",
@@ -198,6 +216,21 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
 
           <button
             type="button"
+            onClick={() => setEnvPanelOpen((prev) => !prev)}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-all border ${
+              resolvedEnv?.isCustom || Boolean(uiEnvOverride)
+                ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40"
+                : "st-btn-secondary border-transparent"
+            }`}
+            title={`cwd: ${previewCwd}, python: ${resolvedEnv?.python || "auto"}`}
+          >
+            <span>
+              ⚙️ {resolvedEnv?.badgeText || (uiEnvOverride ? "Custom Env" : "Env")}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               navigator.clipboard.writeText(resolvedPreview);
               setCopied(true);
@@ -215,6 +248,24 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
           </button>
         </div>
       </div>
+
+      {envPanelOpen && (
+        <CommandEnvEditor
+          skillId={skillId}
+          targetKind="action"
+          targetId="adhoc-runbook"
+          targetTitle={commentHint || "Markdown Runbook Command"}
+          defaultWorkspace={activeWorkspace}
+          initialConfig={uiEnvOverride}
+          resolvedSummary={resolvedEnv}
+          onSaved={(result) => {
+            if (result.skill) {
+              onSkillUpdated?.(result.skill);
+            }
+          }}
+          onClose={() => setEnvPanelOpen(false)}
+        />
+      )}
 
       {/* Highlighted Original Synopsis */}
       <pre
@@ -323,6 +374,8 @@ interface MarkdownContentRendererProps {
   markdown: string;
   currentSource: string;
   activeWorkspace: string;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   showSummaryBar?: boolean;
   onNavigateRelativeMd?: (targetSource: string, title?: string) => void;
   onExecuteAdHoc: (params: {
@@ -340,6 +393,8 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
   markdown,
   currentSource,
   activeWorkspace,
+  commandEnvOverrides,
+  onSkillUpdated,
   showSummaryBar = true,
   onNavigateRelativeMd,
   onExecuteAdHoc,
@@ -498,6 +553,8 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
                       rawCommand={cmdItem.command}
                       commentHint={cmdItem.comment}
                       activeWorkspace={activeWorkspace}
+                      uiEnvOverride={commandEnvOverrides?.["action:adhoc-runbook"]}
+                      onSkillUpdated={onSkillUpdated}
                       onExecuteAdHoc={(p) => onExecuteAdHoc(p)}
                     />
                   ))}
@@ -551,6 +608,8 @@ interface MarkdownViewerProps {
   activeWorkspace: string;
   pythonExecutable: string;
   configuredEnv: Record<string, string>;
+  commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  onSkillUpdated?: (skill: CanonicalSkill) => void;
   theme: "light" | "dark";
   refreshTrigger: number;
   onContextChanged?: () => void;
@@ -579,6 +638,8 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({
   activeWorkspace,
   pythonExecutable,
   configuredEnv,
+  commandEnvOverrides,
+  onSkillUpdated,
   theme,
   refreshTrigger,
   onContextChanged,
@@ -929,6 +990,8 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({
           markdown={content}
           currentSource={currentSource}
           activeWorkspace={activeWorkspace}
+          commandEnvOverrides={commandEnvOverrides}
+          onSkillUpdated={onSkillUpdated}
           showSummaryBar={true}
           onNavigateRelativeMd={(src, title) => navigateToSource(src, title, "markdown")}
           onExecuteAdHoc={onExecuteAdHoc}

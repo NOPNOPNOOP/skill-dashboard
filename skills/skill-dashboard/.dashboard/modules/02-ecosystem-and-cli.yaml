@@ -104,13 +104,29 @@ data:
       - key: "location"
         label: "Hub"
         type: "text"
+    pivot:
+      rowKey: "id"
+      colKeys:
+        - "status"
+        - "hasScripts"
+        - "totalRuns"
+        - "location"
+      emptyValue: "—"
+    treeSpec:
+      groupBy:
+        - "status"
+      labelKey: "id"
+      metaKey: "totalRuns"
+    listSpec:
+      labelKey: "id"
+      metaKey: "status"
     rowActions:
       - label: "Symbol Map"
         actionId: manifest-cli-map
         mode: run
         args:
           skill_id: "{{row.id}}"
-      - label: "Sync Manifest →"
+      - label: "Sync Manifest"
         actionId: sync-target-skill
         mode: prefill
         args:

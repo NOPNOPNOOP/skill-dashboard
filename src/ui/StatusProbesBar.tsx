@@ -6,12 +6,15 @@ import {
   ChevronDown,
   ChevronRight,
   Code2,
+  Columns,
   Copy,
   Database,
   Eye,
   GitBranch,
   Layers,
+  LayoutGrid,
   ListTree,
+  Pin,
   Play,
   RefreshCw,
   Search,
@@ -24,7 +27,13 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildTreeFromArbitraryData,
   computeGraphTopology,
+  evaluateActionPrecondition,
+  inferDataPrimitive,
   interpolateBoundTriggerArgs,
+  projectRecordsToGraph,
+  projectRecordsToList,
+  projectRecordsToMatrix,
+  projectRecordsToTree,
 } from "../interpolator.ts";
 import type {
   ActionGroup,
@@ -34,6 +43,7 @@ import type {
   CommandEnvConfig,
   ContextField,
   DataNode,
+  DataPrimitive,
   DataShape,
   DataSnapshot,
   GraphEdgeItem,
@@ -82,7 +92,14 @@ interface ActiveBoundActionAudit {
   seq: number;
 }
 
-function getAvailableViewsForNode(baseShape: DataShape, rawParsed: unknown): DataShape[] {
+function getAvailableViewsForNode(
+  node: DataNode,
+  baseShape: DataShape,
+  rawParsed: unknown
+): DataShape[] {
+  if (node.views && node.views.length > 0) {
+    return node.views;
+  }
   if (baseShape === "kv") return ["kv", "tree"];
   if (baseShape === "tree") {
     const isPlainObj =
@@ -90,12 +107,36 @@ function getAvailableViewsForNode(baseShape: DataShape, rawParsed: unknown): Dat
     return isPlainObj ? ["tree", "kv"] : ["tree", "table"];
   }
   if (baseShape === "table" || baseShape === "matrix" || baseShape === "list") {
-    return ["table", "matrix", "list", "tree"];
+    const hasGraphSpec = Boolean(node.graphSpec?.dependsOnKey || node.graphSpec?.parentKey);
+    return hasGraphSpec
+      ? ["table", "matrix", "list", "tree", "graph"]
+      : ["table", "matrix", "list", "tree"];
   }
   if (baseShape === "graph") {
     return ["graph", "table", "tree"];
   }
   return [];
+}
+
+function summarizeNodeSnapshot(node: DataNode, snap: DataSnapshot | undefined): string {
+  if (!snap) return "Loading…";
+  if (snap.status === "error") return "Error";
+  const val = snap.value;
+  if (val && Array.isArray(val.rows)) return `${val.rows.length} rows`;
+  if (val && Array.isArray(val.nodes)) {
+    return `${val.nodes.length} nodes · ${val.edges?.length || 0} edges`;
+  }
+  if (val && Array.isArray(val.roots)) return `${val.roots.length} roots`;
+  if (val && Array.isArray(val.items)) return `${val.items.length} items`;
+  if (val && Array.isArray(val.rowKeys)) {
+    return `${val.rowKeys.length}×${val.colKeys?.length || 0} matrix`;
+  }
+  if (val && Array.isArray(val.entries)) return `${val.entries.length} keys`;
+  if (val && val.value !== undefined && typeof val.value !== "object") {
+    return `${val.value}${val.unit ? " " + val.unit : ""}`;
+  }
+  if (node.runtime === "passive" && !snap.stdout) return "Idle (passive)";
+  return `${snap.durationMs}ms`;
 }
 
 function projectSnapshotToView(
@@ -109,34 +150,14 @@ function projectSnapshotToView(
 
   const rawData = snap.rawParsed !== undefined ? snap.rawParsed : snap.value;
 
-  if (effectiveShape === "tree") {
-    return { roots: buildTreeFromArbitraryData(rawData) };
-  }
-
-  if (effectiveShape === "kv") {
-    const rec: Record<string, unknown> =
-      rawData && typeof rawData === "object" && !Array.isArray(rawData)
-        ? (rawData as Record<string, unknown>)
-        : { value: JSON.stringify(rawData) };
-    const entries = Object.entries(rec).map(([k, v]) => {
-      const isComplex = typeof v === "object" && v !== null;
-      return {
-        key: k,
-        label: k,
-        value: isComplex ? JSON.stringify(v) : (v as string | number | boolean),
-        rawValue: isComplex ? v : undefined,
-      };
-    });
-    return { entries, record: rec };
-  }
-
-  // Extract flat records array for table / list / matrix projections
+  // Extract flat records array for table / list / matrix / grouped-tree / graph projections
   const extractRows = (): Record<string, unknown>[] => {
     if (Array.isArray(snap.value?.rows)) return snap.value.rows;
     if (Array.isArray(snap.value?.nodes)) {
       return snap.value.nodes.map((n: GraphNodeItem) => ({
         id: n.id,
         label: n.label,
+        value: n.value || n.id,
         layer: n.layer ?? 0,
         group: n.group || "default",
         upstreamCount: n.upstreamIds?.length || 0,
@@ -173,18 +194,36 @@ function projectSnapshotToView(
     return [];
   };
 
+  if (effectiveShape === "tree") {
+    const rows = extractRows();
+    if (rows.length > 0 && node.treeSpec?.groupBy && node.treeSpec.groupBy.length > 0) {
+      return {
+        roots: projectRecordsToTree(rows, node.treeSpec, node.primaryKey || "id"),
+      };
+    }
+    return { roots: buildTreeFromArbitraryData(rawData) };
+  }
+
+  if (effectiveShape === "kv") {
+    const rec: Record<string, unknown> =
+      rawData && typeof rawData === "object" && !Array.isArray(rawData)
+        ? (rawData as Record<string, unknown>)
+        : { value: JSON.stringify(rawData) };
+    const entries = Object.entries(rec).map(([k, v]) => {
+      const isComplex = typeof v === "object" && v !== null;
+      return {
+        key: k,
+        label: k,
+        value: isComplex ? JSON.stringify(v) : (v as string | number | boolean),
+        rawValue: isComplex ? v : undefined,
+      };
+    });
+    return { entries, record: rec };
+  }
+
   if (effectiveShape === "list") {
     const rows = extractRows();
-    const valCol = node.valueColumn || node.primaryKey || "id";
-    const lblCol = node.labelColumn || "label";
-    const metaCol = node.metaColumn || "status";
-    const items = rows.map((r) => {
-      const v = String(r[valCol] ?? r.value ?? r.name ?? r.id ?? JSON.stringify(r));
-      const l = String(r[lblCol] ?? r.label ?? r.title ?? r.name ?? v);
-      const m = r[metaCol] !== undefined ? String(r[metaCol]) : r.meta ? String(r.meta) : undefined;
-      return { value: v, label: l, meta: m, raw: r };
-    });
-    return { items };
+    return { items: projectRecordsToList(rows, node.listSpec, node) };
   }
 
   if (effectiveShape === "table") {
@@ -215,44 +254,22 @@ function projectSnapshotToView(
   }
 
   if (effectiveShape === "matrix") {
-    if (snap.value?.rowKeys && snap.value?.colKeys && snap.value?.cells) {
+    if (baseShape === "matrix" && snap.value?.rowKeys && snap.value?.colKeys && snap.value?.cells) {
       return snap.value;
     }
     const rows = extractRows();
-    const keys = rows[0] ? Object.keys(rows[0]) : [];
-    const rKey = node.pivot?.rowKey || node.primaryKey || keys[0] || "id";
-    const cKey =
-      node.pivot?.colKey ||
-      keys.find(
-        (k) =>
-          k !== rKey && /status|state|agent|location|category|group|type|has/i.test(k)
-      ) ||
-      keys[1] ||
-      rKey;
-    const vKey =
-      node.pivot?.valueKey ||
-      keys.find((k) => k !== rKey && k !== cKey && typeof rows[0]?.[k] === "number") ||
-      keys.find((k) => k !== rKey && k !== cKey) ||
-      "";
-    const rowSet = new Set<string>();
-    const colSet = new Set<string>();
-    const cells: Record<string, Record<string, unknown>> = {};
-    for (const r of rows) {
-      const rk = String(r[rKey] ?? "");
-      const ck = String(r[cKey] ?? "");
-      if (!rk || !ck) continue;
-      rowSet.add(rk);
-      colSet.add(ck);
-      cells[rk] = cells[rk] || {};
-      cells[rk]![ck] = vKey ? r[vKey] : "●";
-    }
-    return { rowKeys: [...rowSet], colKeys: [...colSet], cells };
+    return projectRecordsToMatrix(rows, node.pivot, node.primaryKey || "id");
   }
 
   if (effectiveShape === "graph") {
-    const rawNodes = Array.isArray((rawData as any)?.nodes) ? (rawData as any).nodes : [];
-    const rawEdges = Array.isArray((rawData as any)?.edges) ? (rawData as any).edges : [];
-    return computeGraphTopology(rawNodes, rawEdges);
+    if (
+      Array.isArray((rawData as any)?.nodes) &&
+      Array.isArray((rawData as any)?.edges)
+    ) {
+      return computeGraphTopology((rawData as any).nodes, (rawData as any).edges);
+    }
+    const rows = extractRows();
+    return projectRecordsToGraph(rows, node.graphSpec, node.primaryKey || "id");
   }
 
   return snap.value;
@@ -292,6 +309,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const [expandedKvPaths, setExpandedKvPaths] = useState<Record<string, boolean>>({});
   const [collapsedTreeIds, setCollapsedTreeIds] = useState<Record<string, Set<string>>>({});
   const [activeGraphNodeId, setActiveGraphNodeId] = useState<Record<string, string | null>>({});
+  const [workbenchLayout, setWorkbenchLayout] = useState<"split" | "accordion" | "grid">("split");
+  const [focusedDataNodeId, setFocusedDataNodeId] = useState<string | null>(null);
+  const [pinnedNodeIds, setPinnedNodeIds] = useState<string[]>([]);
+  const [expandedAccordionIds, setExpandedAccordionIds] = useState<Set<string>>(new Set());
   const skipNextRefreshTriggerRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -336,6 +357,67 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const visibleNodes = activePool.filter(
     (n) => selectedCategory === "all" || n.category === selectedCategory
   );
+
+  const scalarNodes = visibleNodes.filter((n) => {
+    const snap = snapshots[n.id];
+    const baseShape = (snap?.shape || n.shape || "raw") as DataShape;
+    const prim = snap?.primitive || inferDataPrimitive(baseShape, snap?.rawParsed);
+    return (prim === "Scalar" || baseShape === "scalar") && !n.intermediate && !n.hidden;
+  });
+
+  const workbenchNodes = visibleNodes.filter(
+    (n) => !scalarNodes.some((sn) => sn.id === n.id)
+  );
+
+  useEffect(() => {
+    const nonScalarCount = (dataNodes || []).filter(
+      (n) => !n.intermediate && !n.hidden && n.shape !== "scalar"
+    ).length;
+    setWorkbenchLayout(nonScalarCount >= 3 ? "split" : "grid");
+    const firstNonScalar = (dataNodes || []).find(
+      (n) => !n.intermediate && !n.hidden && n.shape !== "scalar"
+    );
+    setFocusedDataNodeId(firstNonScalar?.id || (dataNodes || [])[0]?.id || null);
+    // Auto-pin the first master-detail node (with selectContextKey) if another node exists
+    const masterNode = (dataNodes || []).find(
+      (n) => Boolean(n.selectContextKey) && !n.intermediate && !n.hidden
+    );
+    if (masterNode && nonScalarCount >= 3) {
+      setPinnedNodeIds([masterNode.id]);
+      const firstDownstream = (dataNodes || []).find(
+        (n) =>
+          !n.intermediate &&
+          !n.hidden &&
+          n.shape !== "scalar" &&
+          n.id !== masterNode.id
+      );
+      if (firstDownstream) {
+        setFocusedDataNodeId(firstDownstream.id);
+      }
+    } else {
+      setPinnedNodeIds([]);
+    }
+    setExpandedAccordionIds(
+      new Set(firstNonScalar ? [firstNonScalar.id] : [])
+    );
+  }, [skillId]);
+
+  useEffect(() => {
+    if (
+      workbenchNodes.length > 0 &&
+      (!focusedDataNodeId || !workbenchNodes.some((n) => n.id === focusedDataNodeId))
+    ) {
+      const candidate =
+        workbenchNodes.find((n) => !pinnedNodeIds.includes(n.id)) || workbenchNodes[0];
+      if (candidate) setFocusedDataNodeId(candidate.id);
+    }
+  }, [selectedCategory, showIntermediates, workbenchNodes.length]);
+
+  const togglePinNode = (nodeId: string) => {
+    setPinnedNodeIds((prev) =>
+      prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId]
+    );
+  };
 
   const isAnyLoading = Object.values(loadingMap).some(Boolean);
 
@@ -539,7 +621,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     scope: {
       row?: Record<string, unknown>;
       selectedRows?: Record<string, unknown>[];
-      cell?: { rowKey: string; colKey: string; value: unknown };
+      cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
       node?: {
         id: string;
         label?: string;
@@ -547,6 +629,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         path?: string;
         upstreamIds?: string[];
         downstreamIds?: string[];
+        rawRow?: Record<string, unknown>;
       };
       scopeSummary?: string;
     }
@@ -566,14 +649,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     });
   };
 
-  const renderBoundTriggerButton = (
+  const handleBoundTriggerLeftClick = (
     node: DataNode,
     triggerKind: ActiveBoundActionAudit["triggerKind"],
     trigger: BoundActionTrigger,
     scope: {
       row?: Record<string, unknown>;
       selectedRows?: Record<string, unknown>[];
-      cell?: { rowKey: string; colKey: string; value: unknown };
+      cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
       node?: {
         id: string;
         label?: string;
@@ -581,6 +664,82 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         path?: string;
         upstreamIds?: string[];
         downstreamIds?: string[];
+        rawRow?: Record<string, unknown>;
+      };
+      scopeSummary?: string;
+    }
+  ) => {
+    const targetInfo = actionsMap.get(trigger.actionId);
+    const targetAction = targetInfo?.action;
+    if (!targetAction) {
+      triggerBound(node, triggerKind, trigger, scope);
+      return;
+    }
+
+    const resolvedArgs = interpolateBoundTriggerArgs(trigger.args, {
+      ...scope,
+      contextValues: contextState,
+      dataSnapshots: snapshots,
+    });
+
+    const mergedFormValues: Record<string, unknown> = {};
+    for (const f of targetAction.form || []) {
+      if (f.default !== undefined) mergedFormValues[f.key] = f.default;
+      else if (f.type === "boolean") mergedFormValues[f.key] = false;
+      else mergedFormValues[f.key] = "";
+    }
+    for (const [k, v] of Object.entries(resolvedArgs)) {
+      if (v !== undefined && v !== "") {
+        mergedFormValues[k] = v;
+      }
+    }
+
+    const hasMissingRequired = (targetAction.form || []).some((f) => {
+      if (!f.required) return false;
+      if (f.when && mergedFormValues[f.when.field] !== f.when.equals) return false;
+      const val = mergedFormValues[f.key];
+      return val === undefined || val === null || val === "";
+    });
+
+    const hasFailedPrecondition = (targetAction.preconditions || []).some(
+      (pre) => !evaluateActionPrecondition(pre, snapshots).passed
+    );
+
+    if (
+      trigger.mode === "prefill" ||
+      targetAction.danger === "warn" ||
+      targetAction.danger === "danger" ||
+      Boolean(targetAction.requiresHumanApprovalFlag) ||
+      hasMissingRequired ||
+      hasFailedPrecondition
+    ) {
+      triggerBound(node, triggerKind, trigger, scope);
+      return;
+    }
+
+    void onExecuteBoundTrigger({
+      actionId: trigger.actionId,
+      mode: "run",
+      formValues: mergedFormValues,
+    });
+  };
+
+  const renderBoundTriggerButton = (
+    node: DataNode,
+    triggerKind: ActiveBoundActionAudit["triggerKind"],
+    trigger: BoundActionTrigger,
+    scope: {
+      row?: Record<string, unknown>;
+      selectedRows?: Record<string, unknown>[];
+      cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
+      node?: {
+        id: string;
+        label?: string;
+        value?: unknown;
+        path?: string;
+        upstreamIds?: string[];
+        downstreamIds?: string[];
+        rawRow?: Record<string, unknown>;
       };
       scopeSummary?: string;
     },
@@ -607,13 +766,18 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       ? `❌ Missing Action ID "${trigger.actionId}" (not found in actionGroups)`
       : `Target: ${targetAction?.title || trigger.actionId} (${trigger.actionId}) · Mode: ${
           trigger.mode || "run"
-        } · Safety: ${dangerLevel}\nResolved Args: ${argsTooltip}\nClick to audit command & execute`;
+        } · Safety: ${dangerLevel}\nResolved Args: ${argsTooltip}\nLeft-Click: Execute · Right-Click: Configure & Audit`;
 
     return (
       <button
         key={key}
         type="button"
-        onClick={() => triggerBound(node, triggerKind, trigger, scope)}
+        onClick={() => handleBoundTriggerLeftClick(node, triggerKind, trigger, scope)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          triggerBound(node, triggerKind, trigger, scope);
+        }}
         title={tooltip}
         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all border ${
           isMissing
@@ -633,17 +797,6 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
           <Play className="w-2.5 h-2.5 text-sky-500 fill-current shrink-0" />
         )}
         <span>{trigger.label}</span>
-        <code
-          className={`px-1 py-0.5 rounded text-[10px] font-mono ${
-            isMissing
-              ? "bg-rose-500/20 text-rose-600 dark:text-rose-300"
-              : variant === "primary"
-                ? "bg-black/20 text-white/90"
-                : "bg-black/5 dark:bg-white/10 st-text-muted"
-          }`}
-        >
-          → {trigger.actionId}
-        </code>
       </button>
     );
   };
@@ -859,8 +1012,52 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
             )}
           </div>
 
-          {/* Right Side: Intermediates Toggle + Refresh Data Button */}
+          {/* Right Side: Workbench Layout Switcher + Intermediates Toggle + Refresh Data Button */}
           <div className="flex items-center gap-2 flex-wrap">
+            {workbenchNodes.length > 0 && (
+              <div
+                className="inline-flex items-center rounded-xl p-0.5 st-subcard border st-border"
+                title="Switch Data Workbench Layout (Split Focus Navigator / Accordion / Grid)"
+              >
+                <button
+                  type="button"
+                  onClick={() => setWorkbenchLayout("split")}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    workbenchLayout === "split"
+                      ? "bg-sky-600 text-white shadow-sm"
+                      : "st-text-secondary hover:st-text-primary"
+                  }`}
+                >
+                  <Columns className="w-3.5 h-3.5" />
+                  <span>Focus</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setWorkbenchLayout("accordion")}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    workbenchLayout === "accordion"
+                      ? "bg-sky-600 text-white shadow-sm"
+                      : "st-text-secondary hover:st-text-primary"
+                  }`}
+                >
+                  <ListTree className="w-3.5 h-3.5" />
+                  <span>Accordion</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setWorkbenchLayout("grid")}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                    workbenchLayout === "grid"
+                      ? "bg-sky-600 text-white shadow-sm"
+                      : "st-text-secondary hover:st-text-primary"
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>Grid</span>
+                </button>
+              </div>
+            )}
+
             {intermediateNodes.length > 0 && (
               <button
                 type="button"
@@ -899,20 +1096,108 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         </div>
       )}
 
-      {/* 3. Reactive Data Nodes & Interactive Widgets Grid */}
-      {visibleNodes.length > 0 ? (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {visibleNodes.map((node) => {
+      {/* 2b. Top Compact Scalar KPI Strip */}
+      {scalarNodes.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {scalarNodes.map((node) => {
+            const snap = snapshots[node.id];
+            const loading = Boolean(loadingMap[node.id]);
+            const scalarVal = snap?.value;
+            const tone = scalarVal?.tone || "neutral";
+            const toneColor =
+              tone === "success"
+                ? "text-emerald-600 dark:text-emerald-400"
+                : tone === "warn"
+                  ? "text-amber-600 dark:text-amber-400"
+                  : tone === "danger"
+                    ? "text-rose-600 dark:text-rose-400"
+                    : "text-sky-600 dark:text-sky-400";
+            return (
+              <div
+                key={node.id}
+                data-sd-pick-kind="data-node"
+                data-sd-pick-id={node.id}
+                data-sd-pick-title={`Scalar KPI: ${node.title}`}
+                className="st-card rounded-2xl px-4 py-3 flex flex-col gap-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Activity className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                    <span className="text-xs font-bold st-text-primary truncate">{node.title}</span>
+                    <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono font-bold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 shrink-0">
+                      Scalar ➔ KPI
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setInspectNodeId((prev) => (prev === node.id ? null : node.id))
+                      }
+                      className="p-1 rounded-lg st-btn-secondary"
+                      title="Inspect Scalar KPI Node"
+                    >
+                      <Eye className="w-3 h-3 text-sky-500" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => refreshSingleNode(node)}
+                      disabled={loading}
+                      className="p-1 rounded-lg st-btn-secondary"
+                      title="Refresh KPI"
+                    >
+                      <RefreshCw
+                        className={`w-3 h-3 ${loading ? "animate-spin text-sky-500" : ""}`}
+                      />
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className={`text-xl font-extrabold font-mono ${toneColor}`}>
+                    {loading && !snap ? "…" : String(scalarVal?.value ?? "—")}
+                  </span>
+                  {scalarVal?.unit && (
+                    <span className="text-xs font-medium st-text-secondary">
+                      {scalarVal.unit}
+                    </span>
+                  )}
+                </div>
+                {inspectNodeId === node.id && (
+                  <div className="st-code-surface rounded-lg border st-border p-2 font-mono text-[11px] overflow-x-auto">
+                    <div className="text-[10px] st-text-muted mb-1">
+                      id: {node.id} · runtime: {node.runtime || "zsh"}
+                    </div>
+                    <pre className="whitespace-pre-wrap break-all">
+                      {snap?.resolvedSource || node.code || node.command || ""}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 3. Reactive Data Workbench (Split Focus / Accordion / Grid) */}
+      {(() => {
+        const renderDataNodeCard = (node: DataNode) => {
             const snap = snapshots[node.id];
             const loading = Boolean(loadingMap[node.id]);
             const expanded = Boolean(expandedMap[node.id]);
             const baseShape = (snap?.shape || node.shape || "raw") as DataShape;
-            const availableViews = getAvailableViewsForNode(baseShape, snap?.rawParsed);
+            const primitive: DataPrimitive =
+              snap?.primitive || inferDataPrimitive(baseShape, snap?.rawParsed);
+            const availableViews = getAvailableViewsForNode(node, baseShape, snap?.rawParsed);
             const shape = (viewModeOverride[node.id] || baseShape) as DataShape;
             const projectedValue = projectSnapshotToView(node, snap, shape);
             const isFullSpan =
-              shape === "table" || shape === "matrix" || shape === "graph" || shape === "tree";
+              workbenchLayout !== "grid" ||
+              shape === "table" ||
+              shape === "matrix" ||
+              shape === "graph" ||
+              shape === "tree";
             const isIntermediate = Boolean(node.intermediate || node.hidden);
+            const isPinned = pinnedNodeIds.includes(node.id);
             const selectContextKey = snap?.selectContextKey || node.selectContextKey;
             const activeMasterContextVal = selectContextKey
               ? String(contextState[selectContextKey] ?? "all")
@@ -941,7 +1226,9 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 data-sd-pick-title={`Data Node: ${node.title}`}
                 className={`st-card rounded-2xl p-4 flex flex-col gap-3 transition-all ${
                   isFullSpan ? "xl:col-span-2" : ""
-                } ${isIntermediate ? "border-dashed border-amber-500/40" : ""}`}
+                } ${isIntermediate ? "border-dashed border-amber-500/40" : ""} ${
+                  isPinned && workbenchLayout === "split" ? "ring-1 ring-sky-500/40" : ""
+                }`}
               >
                 {/* Header */}
                 <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -956,11 +1243,13 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                       <Activity className="w-4 h-4 text-emerald-500 shrink-0" />
                     )}
                     <h4 className="text-sm font-bold st-text-primary truncate">{node.title}</h4>
-                    {node.category && (
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/10 text-sky-700 dark:text-sky-300 border border-sky-500/20">
-                        {node.category}
-                      </span>
-                    )}
+                    {/* Explicit 5-Primitive -> View Badge */}
+                    <span
+                      className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 shrink-0"
+                      title={`Data Primitive: ${primitive} · Active UI View: ${shape.toUpperCase()} (${node.runtime || "zsh"})`}
+                    >
+                      {primitive} ➔ {shape.toUpperCase()}
+                    </span>
                     {isIntermediate && (
                       <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
                         🔬 INTERMEDIATE · DAG SOURCE
@@ -987,9 +1276,20 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                         )}
                       </span>
                     )}
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono st-pill uppercase">
-                      {node.runtime || "zsh"} · {shape}
-                    </span>
+                    {isCustomEnv && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInspectNodeId(node.id);
+                          setInspectTabMap((prev) => ({ ...prev, [node.id]: "source" }));
+                          setOpenEnvNodeId(node.id);
+                        }}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                        title={`Custom Env: cwd=${envSummary?.cwd || node.cwd || activeWorkspace}`}
+                      >
+                        ⚙️ {envSummary?.badgeText || "Custom Env"}
+                      </button>
+                    )}
                     {snap && (
                       <span className="text-[11px] font-mono st-text-muted shrink-0">
                         ({snap.durationMs}ms{snap.fromCache ? " · cached" : ""})
@@ -998,7 +1298,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-                    {/* Decoupled In-Card View Switcher (KV ⇄ Tree, Table ⇄ Matrix ⇄ List ⇄ Tree, Graph ⇄ Table ⇄ Tree) */}
+                    {/* Decoupled In-Card View Switcher */}
                     {availableViews.length > 1 && (
                       <div
                         className="inline-flex items-center rounded-lg p-0.5 st-subcard border st-border"
@@ -1041,18 +1341,37 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                       </div>
                     )}
 
+                    {workbenchLayout === "split" && (
+                      <button
+                        type="button"
+                        onClick={() => togglePinNode(node.id)}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
+                          isPinned
+                            ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40"
+                            : "st-btn-secondary border-transparent"
+                        }`}
+                        title={
+                          isPinned
+                            ? "Unpin from split-view canvas"
+                            : "Pin this card in split-view canvas for side-by-side Master-Detail comparison"
+                        }
+                      >
+                        <Pin className="w-3 h-3" />
+                        <span>{isPinned ? "Pinned" : "Pin"}</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => {
                         setInspectNodeId((prev) => (prev === node.id ? null : node.id));
-                        setOpenEnvNodeId(null);
                       }}
                       className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
                         inspectNodeId === node.id
                           ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40 shadow-sm"
                           : "st-btn-secondary border-transparent"
                       }`}
-                      title="White-box inspect DataNode execution source, bound actions & raw payload"
+                      title="White-box inspect DataNode execution source, Env, bound actions & raw payload"
                     >
                       <Eye className="w-3.5 h-3.5 text-sky-500" />
                       <span>
@@ -1067,26 +1386,6 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                           return totalBound > 0 ? ` (${totalBound})` : "";
                         })()}
                       </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenEnvNodeId((prev) => (prev === node.id ? null : node.id));
-                        setInspectNodeId(null);
-                      }}
-                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border shrink-0 ${
-                        isCustomEnv
-                          ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 shadow-sm"
-                          : "st-btn-secondary border-transparent"
-                      }`}
-                      title={
-                        isCustomEnv
-                          ? `Custom Env: cwd: ${envSummary?.cwd || node.cwd || activeWorkspace}`
-                          : `cwd: ${envSummary?.cwd || activeWorkspace} · python: ${envSummary?.python || "auto"}`
-                      }
-                    >
-                      <span>⚙️ {isCustomEnv ? (envSummary?.badgeText || "Custom Env") : "Env"}</span>
                     </button>
 
                     <button
@@ -1209,11 +1508,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 <span className="px-2 py-0.5 rounded st-pill">
                                   id: {node.id}
                                 </span>
+                                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
+                                  primitive: {primitive}
+                                </span>
                                 <span className="px-2 py-0.5 rounded st-pill">
                                   runtime: {node.runtime || "zsh"}
                                 </span>
                                 <span className="px-2 py-0.5 rounded st-pill">
-                                  shape: {shape}
+                                  shape: {shape} (base: {baseShape})
                                 </span>
                                 {node.parse?.format && (
                                   <span className="px-2 py-0.5 rounded st-pill">
@@ -1225,7 +1527,24 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 </span>
                               </div>
 
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setOpenEnvNodeId((prev) => (prev === node.id ? null : node.id))
+                                  }
+                                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-all border ${
+                                    isCustomEnv
+                                      ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40"
+                                      : "st-btn-secondary border-transparent"
+                                  }`}
+                                  title={`cwd: ${envSummary?.cwd || activeWorkspace} · python: ${envSummary?.python || "auto"}`}
+                                >
+                                  <span>
+                                    ⚙️ {isCustomEnv ? (envSummary?.badgeText || "Custom Env") : "Env"}
+                                  </span>
+                                </button>
+
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -1741,7 +2060,25 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                   (() => {
                     const roots: TreeNodeItem[] = projectedValue.roots || [];
                     const q = (tableSearch[node.id] || "").trim().toLowerCase();
-                    const collapsedSet = collapsedTreeIds[node.id] || new Set<string>();
+                    const defaultExpandDepth = node.treeSpec?.defaultExpandDepth;
+                    const collectDepthCollapsedIds = (
+                      items: TreeNodeItem[],
+                      depth = 0
+                    ): string[] => {
+                      if (defaultExpandDepth === undefined) return [];
+                      const ids: string[] = [];
+                      for (const it of items) {
+                        if (it.children && it.children.length > 0) {
+                          if (depth + 1 >= defaultExpandDepth) {
+                            ids.push(it.id);
+                          }
+                          ids.push(...collectDepthCollapsedIds(it.children, depth + 1));
+                        }
+                      }
+                      return ids;
+                    };
+                    const collapsedSet =
+                      collapsedTreeIds[node.id] || new Set<string>(collectDepthCollapsedIds(roots, 0));
                     const nodeActions = node.nodeActions || node.rowActions || [];
 
                     const collectExpandableIds = (items: TreeNodeItem[]): string[] => {
@@ -1857,42 +2194,18 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 className="flex items-center gap-1.5 shrink-0"
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                {item.actionId && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      triggerBound(
-                                        node,
-                                        "Node Action",
-                                        {
-                                          label: item.label,
-                                          actionId: item.actionId!,
-                                          mode: "run",
-                                          args: item.args,
-                                        },
-                                        {
-                                          node: {
-                                            id: item.id,
-                                            label: item.label,
-                                            value: item.value,
-                                            path: item.path,
-                                          },
-                                          scopeSummary: `Tree Node ${item.path || item.id}`,
-                                        }
-                                      )
-                                    }
-                                    className="px-2 py-0.5 rounded st-btn-secondary font-mono text-[11px]"
-                                  >
-                                    → {item.actionId}
-                                  </button>
-                                )}
-                                {nodeActions.map((na, nIdx) =>
+                                {item.actionId &&
                                   renderBoundTriggerButton(
                                     node,
                                     "Node Action",
-                                    na,
                                     {
-                                      row: {
+                                      label: item.label,
+                                      actionId: item.actionId,
+                                      mode: "run",
+                                      args: item.args,
+                                    },
+                                    {
+                                      row: item.rawRow || {
                                         id: item.id,
                                         label: item.label,
                                         value: item.value,
@@ -1903,13 +2216,39 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                         label: item.label,
                                         value: item.value,
                                         path: item.path,
+                                        rawRow: item.rawRow,
                                       },
                                       scopeSummary: `Tree Node ${item.path || item.id}`,
                                     },
-                                    nIdx,
+                                    `tree-item-${item.id}`,
                                     "secondary"
-                                  )
-                                )}
+                                  )}
+                                {(item.rawRow || !hasChildren) &&
+                                  nodeActions.map((na, nIdx) =>
+                                    renderBoundTriggerButton(
+                                      node,
+                                      "Node Action",
+                                      na,
+                                      {
+                                        row: item.rawRow || {
+                                          id: item.value ?? item.id,
+                                          label: item.label,
+                                          value: item.value ?? item.id,
+                                          path: item.path,
+                                        },
+                                        node: {
+                                          id: item.id,
+                                          label: item.label,
+                                          value: item.value ?? item.id,
+                                          path: item.path,
+                                          rawRow: item.rawRow,
+                                        },
+                                        scopeSummary: `Tree Node ${item.path || item.id}`,
+                                      },
+                                      nIdx,
+                                      "secondary"
+                                    )
+                                  )}
                               </div>
                             </div>
                             {hasChildren && !isCollapsed && (
@@ -2061,7 +2400,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                     args: focusedNode.args,
                                   },
                                   {
-                                    row: {
+                                    row: focusedNode.rawRow || {
                                       id: focusedNode.id,
                                       label: focusedNode.label,
                                       value: focusedNode.value || focusedNode.id,
@@ -2078,7 +2417,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                   "Node Action",
                                   na,
                                   {
-                                    row: {
+                                    row: focusedNode.rawRow || {
                                       id: focusedNode.id,
                                       label: focusedNode.label,
                                       value: focusedNode.value || focusedNode.id,
@@ -2440,53 +2779,145 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                     );
                   })()
                 ) : shape === "matrix" && projectedValue ? (
-                  <div className="rounded-xl border st-border overflow-x-auto max-h-72 overflow-y-auto">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="border-b st-border st-subcard text-[11px] font-bold st-text-secondary">
-                          <th className="py-2 px-3">Row \ Col</th>
-                          {(projectedValue.colKeys || []).map((ck: string) => (
-                            <th key={ck} className="py-2 px-3 text-center">
-                              {ck}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y st-border">
-                        {(projectedValue.rowKeys || []).map((rk: string) => (
-                          <tr key={rk} className="hover:st-surface-muted">
-                            <td className="py-2 px-3 font-mono font-semibold st-text-primary">
-                              {rk}
-                            </td>
-                            {(projectedValue.colKeys || []).map((ck: string) => {
-                              const cellVal = projectedValue.cells?.[rk]?.[ck];
+                  (() => {
+                    const matrixRowActions = node.rowActions || node.nodeActions || [];
+                    return (
+                      <div className="rounded-xl border st-border overflow-x-auto max-h-72 overflow-y-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="border-b st-border st-subcard text-[11px] font-bold st-text-secondary">
+                              <th className="py-2 px-3">Row \ Col</th>
+                              {(projectedValue.colKeys || []).map((ck: string) => (
+                                <th key={ck} className="py-2 px-3 text-center">
+                                  {ck}
+                                </th>
+                              ))}
+                              {!node.cellAction && matrixRowActions.length > 0 && (
+                                <th className="py-2 px-3 text-right">Actions</th>
+                              )}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y st-border">
+                            {(projectedValue.rowKeys || []).map((rk: string) => {
+                              const rawRow =
+                                projectedValue.rowRecordMap?.[rk] || { id: rk, value: rk };
+                              const isSelectedMaster =
+                                Boolean(selectContextKey) && activeMasterContextVal === rk;
                               return (
-                                <td key={ck} className="py-2 px-3 text-center">
-                                  {node.cellAction ? (
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        triggerBound(node, "Cell Action", node.cellAction!, {
-                                          cell: { rowKey: rk, colKey: ck, value: cellVal },
-                                          scopeSummary: `Cell [${rk}, ${ck}] = ${String(cellVal ?? "")}`,
-                                        })
-                                      }
-                                      className="px-2 py-0.5 rounded-md st-btn-secondary font-mono text-xs"
-                                      title={`Target: ${node.cellAction.actionId} · Click to audit & run`}
+                                <tr
+                                  key={rk}
+                                  onClick={() => {
+                                    if (selectContextKey) handleMasterItemClick(rk);
+                                  }}
+                                  className={`transition-colors ${
+                                    selectContextKey ? "cursor-pointer" : ""
+                                  } ${
+                                    isSelectedMaster
+                                      ? "bg-sky-500/15 font-semibold"
+                                      : "hover:st-surface-muted"
+                                  }`}
+                                >
+                                  <td className="py-2 px-3 font-mono font-semibold st-text-primary">
+                                    {rk}
+                                  </td>
+                                  {(projectedValue.colKeys || []).map((ck: string) => {
+                                    const cellVal = projectedValue.cells?.[rk]?.[ck];
+                                    return (
+                                      <td
+                                        key={ck}
+                                        className="py-2 px-3 text-center"
+                                        onClick={(e) => {
+                                          if (node.cellAction) e.stopPropagation();
+                                        }}
+                                      >
+                                        {node.cellAction ? (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleBoundTriggerLeftClick(
+                                                node,
+                                                "Cell Action",
+                                                node.cellAction!,
+                                                {
+                                                  row: rawRow,
+                                                  cell: {
+                                                    rowKey: rk,
+                                                    colKey: ck,
+                                                    value: cellVal,
+                                                    rawRow,
+                                                  },
+                                                  scopeSummary: `Cell [${rk}, ${ck}] = ${String(cellVal ?? "")}`,
+                                                }
+                                              )
+                                            }
+                                            onContextMenu={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              triggerBound(
+                                                node,
+                                                "Cell Action",
+                                                node.cellAction!,
+                                                {
+                                                  row: rawRow,
+                                                  cell: {
+                                                    rowKey: rk,
+                                                    colKey: ck,
+                                                    value: cellVal,
+                                                    rawRow,
+                                                  },
+                                                  scopeSummary: `Cell [${rk}, ${ck}] = ${String(cellVal ?? "")}`,
+                                                }
+                                              );
+                                            }}
+                                            className="px-2 py-0.5 rounded-md st-btn-secondary font-mono text-xs"
+                                            title={`Target: ${node.cellAction.actionId} · Left-Click: Execute · Right-Click: Configure & Audit`}
+                                          >
+                                            {String(cellVal ?? "—")}
+                                          </button>
+                                        ) : (
+                                          <span className="font-mono">
+                                            {String(cellVal ?? "—")}
+                                          </span>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                  {!node.cellAction && matrixRowActions.length > 0 && (
+                                    <td
+                                      className="py-2 px-3 text-right whitespace-nowrap"
+                                      onClick={(e) => e.stopPropagation()}
                                     >
-                                      {String(cellVal ?? "—")}
-                                    </button>
-                                  ) : (
-                                    <span className="font-mono">{String(cellVal ?? "—")}</span>
+                                      <div className="inline-flex items-center gap-1.5 justify-end">
+                                        {matrixRowActions.map((ra, aIdx) =>
+                                          renderBoundTriggerButton(
+                                            node,
+                                            "Row Action",
+                                            ra,
+                                            {
+                                              row: rawRow,
+                                              cell: {
+                                                rowKey: rk,
+                                                colKey: "",
+                                                value: rk,
+                                                rawRow,
+                                              },
+                                              scopeSummary: `Matrix Row ${rk}`,
+                                            },
+                                            aIdx,
+                                            "secondary"
+                                          )
+                                        )}
+                                      </div>
+                                    </td>
                                   )}
-                                </td>
+                                </tr>
                               );
                             })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()
                 ) : (
                   (() => {
                     const rawOut = snap
@@ -2532,13 +2963,223 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 )}
               </div>
             );
-          })}
-        </div>
-      ) : (dataNodes || []).length > 0 ? (
-        <div className="st-card rounded-2xl p-6 text-center text-xs st-text-muted">
-          No reactive data nodes match the current filter.
-        </div>
-      ) : null}
+        };
+
+        if (workbenchNodes.length === 0) {
+          if ((dataNodes || []).length > 0 && scalarNodes.length === 0) {
+            return (
+              <div className="st-card rounded-2xl p-6 text-center text-xs st-text-muted">
+                No reactive data nodes match the current filter.
+              </div>
+            );
+          }
+          return null;
+        }
+
+        if (workbenchLayout === "split") {
+          const groupedByCat = new Map<string, DataNode[]>();
+          for (const n of workbenchNodes) {
+            const cat = n.category || "Data Nodes";
+            const list = groupedByCat.get(cat) || [];
+            list.push(n);
+            groupedByCat.set(cat, list);
+          }
+
+          const pinnedNodes = workbenchNodes.filter((n) => pinnedNodeIds.includes(n.id));
+          const focusedNode =
+            workbenchNodes.find((n) => n.id === focusedDataNodeId) || workbenchNodes[0] || null;
+          const canvasNodes = [...pinnedNodes];
+          if (focusedNode && !canvasNodes.some((n) => n.id === focusedNode.id)) {
+            canvasNodes.push(focusedNode);
+          }
+
+          return (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+              {/* Left Categorized DataNode Navigator */}
+              <aside className="lg:col-span-4 xl:col-span-3 st-card rounded-2xl p-3 flex flex-col gap-2.5 lg:sticky lg:top-4 max-h-[76vh] overflow-y-auto">
+                <div className="flex items-center justify-between px-1 pb-2 border-b st-border">
+                  <span className="text-xs font-bold st-text-primary flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-sky-500" />
+                    <span>Data Nodes ({workbenchNodes.length})</span>
+                  </span>
+                  {pinnedNodes.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-700 dark:text-sky-300 font-semibold">
+                      📌 {pinnedNodes.length} pinned
+                    </span>
+                  )}
+                </div>
+
+                {Array.from(groupedByCat.entries()).map(([catName, catNodes]) => (
+                  <div key={catName} className="flex flex-col gap-1">
+                    {groupedByCat.size > 1 && (
+                      <div className="px-1.5 pt-1 text-[10.5px] font-bold uppercase tracking-wider st-text-muted">
+                        {catName}
+                      </div>
+                    )}
+                    {catNodes.map((n) => {
+                      const nSnap = snapshots[n.id];
+                      const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
+                      const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
+                      const nPrim =
+                        nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
+                      const isFocused = focusedNode?.id === n.id;
+                      const isPinned = pinnedNodeIds.includes(n.id);
+                      const summaryText = summarizeNodeSnapshot(n, nSnap);
+
+                      return (
+                        <div
+                          key={n.id}
+                          onClick={() => setFocusedDataNodeId(n.id)}
+                          className={`group rounded-xl px-2.5 py-2 border transition-all cursor-pointer flex flex-col gap-1 ${
+                            isFocused
+                              ? "bg-sky-500/15 border-sky-500/50 shadow-sm"
+                              : isPinned
+                                ? "st-subcard border-sky-500/30"
+                                : "border-transparent hover:st-surface-muted"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span
+                              className={`text-xs truncate ${
+                                isFocused
+                                  ? "font-bold text-sky-700 dark:text-sky-300"
+                                  : "font-semibold st-text-primary"
+                              }`}
+                            >
+                              {n.title}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                togglePinNode(n.id);
+                              }}
+                              className={`p-1 rounded-md text-[10px] font-mono transition-colors shrink-0 ${
+                                isPinned
+                                  ? "bg-sky-600 text-white"
+                                  : "opacity-60 group-hover:opacity-100 st-btn-secondary"
+                              }`}
+                              title={
+                                isPinned
+                                  ? "Unpin from split-view canvas"
+                                  : "Pin card to keep visible while inspecting other nodes"
+                              }
+                            >
+                              <Pin className="w-3 h-3" />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-1.5 text-[10.5px] font-mono">
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 font-semibold">
+                              {nPrim} ➔ {nShape.toUpperCase()}
+                            </span>
+                            <span className="st-text-muted truncate">{summaryText}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </aside>
+
+              {/* Right Active Canvas (Pinned Master Node(s) + Focused Detail Node) */}
+              <div className="lg:col-span-8 xl:col-span-9 flex flex-col gap-4 min-w-0">
+                {canvasNodes.map((n) => renderDataNodeCard(n))}
+              </div>
+            </div>
+          );
+        }
+
+        if (workbenchLayout === "accordion") {
+          return (
+            <div className="flex flex-col gap-2.5">
+              {workbenchNodes.map((n) => {
+                const isOpen = expandedAccordionIds.has(n.id);
+                const nSnap = snapshots[n.id];
+                const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
+                const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
+                const nPrim =
+                  nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
+                const summaryText = summarizeNodeSnapshot(n, nSnap);
+
+                return (
+                  <div
+                    key={n.id}
+                    className="st-card rounded-2xl overflow-hidden border st-border transition-all"
+                  >
+                    <div
+                      onClick={() =>
+                        setExpandedAccordionIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(n.id)) next.delete(n.id);
+                          else next.add(n.id);
+                          return next;
+                        })
+                      }
+                      className="px-4 py-3 flex items-center justify-between gap-3 cursor-pointer select-none hover:st-surface-muted"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
+                        {isOpen ? (
+                          <ChevronDown className="w-4 h-4 text-sky-500 shrink-0" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 st-text-muted shrink-0" />
+                        )}
+                        <span className="text-sm font-bold st-text-primary truncate">
+                          {n.title}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25">
+                          {nPrim} ➔ {nShape.toUpperCase()}
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[11px] font-mono st-pill">
+                          {summaryText}
+                        </span>
+                      </div>
+
+                      <div
+                        className="flex items-center gap-1.5 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {(n.quickActions || []).map((qa, idx) =>
+                          renderBoundTriggerButton(
+                            n,
+                            "Quick Action",
+                            qa,
+                            { scopeSummary: "Card Quick Action" },
+                            idx,
+                            "secondary"
+                          )
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => refreshSingleNode(n)}
+                          className="p-1.5 rounded-lg st-btn-secondary"
+                          title="Refresh data node"
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${
+                              loadingMap[n.id] ? "animate-spin text-sky-500" : ""
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {isOpen && (
+                      <div className="p-3 pt-0 border-t st-border">{renderDataNodeCard(n)}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
+        return (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {workbenchNodes.map((n) => renderDataNodeCard(n))}
+          </div>
+        );
+      })()}
 
       {/* 4. In-Place Bound Action Audit & Execution Modal */}
       {activeAudit && (

@@ -1851,6 +1851,7 @@ export const App: React.FC = () => {
                   refreshTrigger={refreshTrigger}
                   prefillRequest={prefillRequest}
                   commandEnvOverrides={selectedSkill.commandEnvOverrides}
+                  skillProvenance={selectedSkill.layers?.provenance}
                   onSkillUpdated={(updated) =>
                     setSkills((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
                   }
@@ -1870,6 +1871,10 @@ export const App: React.FC = () => {
                   activeWorkspace={effectiveWorkspace}
                   pythonExecutable={effectivePython}
                   configuredEnv={selectedSkill.configuredEnv || {}}
+                  commandEnvOverrides={selectedSkill.commandEnvOverrides}
+                  onSkillUpdated={(updated) =>
+                    setSkills((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
+                  }
                   theme={theme}
                   refreshTrigger={refreshTrigger}
                   onContextChanged={() => setRefreshTrigger((prev) => prev + 1)}

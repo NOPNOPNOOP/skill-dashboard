@@ -198,9 +198,15 @@ data:
           files: "{{selected.name}}" # comma-joined list of selected row values
 ```
 
-> **In-Place Bound Action Audit & White-Box `🔍 Inspect`**:
-> - Every bound trigger button (`rowActions`, `bulkActions`, `quickActions`, `cellAction`) displays its target `→ <actionId>` badge and hover argument preview, and clicking it opens the **In-Place Bound Action Audit & Execution Modal** (showing the `Form Key` $\leftarrow$ `YAML Template` $\leftarrow$ `Resolved Row Value` mapping table and an embedded `ActionCard` with live command preview and one-click execution).
-> - Every `DataNode` card header also includes a **`🔍 Inspect`** button exposing 3 white-box tabs: **`</> Execution Source`** (showing `DataSnapshot.resolvedSource` + **`▶ Test in Web Terminal`**), **`⚡ Bound Actions (N)`**, and **`📄 Raw Output & DAG`**.
+> **Ergonomic Bound Action Triggers & White-Box `🔍 Inspect`**:
+> - **Left-Click Direct Run / Right-Click Configure**: Left-clicking any bound action button (`rowActions`, `bulkActions`, `quickActions`, `nodeActions`, `cellAction`) immediately executes the action in the Web Terminal when `mode: "run"` (default), `danger: "safe"`, all required fields are satisfied, and no `preconditions` fail. Right-clicking (`onContextMenu`) opens the **Bound Action Audit & Configuration Modal** (`BoundActionInspectorModal`).
+> - **Declarative Multi-View Projection Specs on `data:` Nodes**: Any `Records` node can declare per-view mapping rules in `manifest.yaml` so switching views (`Table ⇄ Matrix ⇄ List ⇄ Tree ⇄ Graph`) uses tailored projections and inherits `rowActions` (`rawRow`) across all views:
+>   - `pivot: { rowKey, colKey, valueKey }` (long-table pivot) or `pivot: { rowKey, colKeys: [...] }` (wide-table attribute matrix)
+>   - `treeSpec: { groupBy: ["status"], labelKey: "id", metaKey: "totalRuns" }` (multi-level directory grouping)
+>   - `listSpec: { labelKey: "id", metaKey: "status" }`
+>   - `graphSpec: { idKey: "id", labelKey: "title", dependsOnKey: "dependsOn" }`
+>   - `views: ["table", "matrix", "tree"]` (optional view switcher whitelist)
+> - **White-Box `🔍 Inspect` & Command-Box `⚙️ Env`**: Both `DataNode` and `ActionItem` cards include a `🔍 Inspect` button in their header, while `⚙️ Env` is consolidated inside the command preview box (`ActionCard`, `DataNode -> Inspect -> Execution Source`, and executable shell blocks in `Knowledge & Docs`).
 > - **Best Practice for Formatted Table Columns**: If a `runtime: ts` table formats a column for UI display (e.g. `doc_id: "#597"`), also include the clean raw field in the row object (e.g. `raw_doc_id: "597"`) and reference `{{row.raw_doc_id}}` in `rowActions.args` so CLI flags receive `"597"` rather than `"#597"`.
 
 ---

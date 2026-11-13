@@ -23,6 +23,11 @@ import {
   getDashboardEngineRoot,
   getManifestCliPath,
   inferAutoDataShape,
+  inferDataPrimitive,
+  projectRecordsToGraph,
+  projectRecordsToList,
+  projectRecordsToMatrix,
+  projectRecordsToTree,
   resolveCommandEnvironment,
   resolveDataSnapshotPath,
   resolvePythonExecutable,
@@ -35,6 +40,11 @@ export {
   collectTreeLeafOptions,
   computeGraphTopology,
   inferAutoDataShape,
+  inferDataPrimitive,
+  projectRecordsToGraph,
+  projectRecordsToList,
+  projectRecordsToMatrix,
+  projectRecordsToTree,
 };
 import {
   ensureUnitSandboxPaths,
@@ -390,9 +400,10 @@ export function normalizeToShapeAndOptions(params: {
   exitCode: number;
   shape: DataShape;
   node?: Partial<DataNode>;
-}): { value: any; options: FormFieldOption[]; resolvedShape: DataShape } {
+}): { value: any; options: FormFieldOption[]; resolvedShape: DataShape; primitive: ReturnType<typeof inferDataPrimitive> } {
   const { data, rawStdout, rawStderr, exitCode, shape: rawShape, node } = params;
   const shape: DataShape = rawShape === "auto" ? inferAutoDataShape(data) : rawShape;
+  const primitive = inferDataPrimitive(shape, data);
   const valCol = node?.valueColumn || node?.primaryKey || "value";
   const lblCol = node?.labelColumn || "label";
   const metaCol = node?.metaColumn;
@@ -407,6 +418,7 @@ export function normalizeToShapeAndOptions(params: {
       value: { stdout: text, stderr: rawStderr, exitCode },
       options: lines.map((l) => ({ label: l, value: l })),
       resolvedShape: "raw",
+      primitive,
     };
   }
 
@@ -427,6 +439,7 @@ export function normalizeToShapeAndOptions(params: {
           .map((r: any) => (r && r[pk] != null ? { label: String(r[pk]), value: String(r[pk]) } : null))
           .filter(Boolean) as FormFieldOption[],
         resolvedShape: "stream",
+        primitive,
       };
     }
     const text = typeof data === "string" ? data : rawStdout || JSON.stringify(data, null, 2);
@@ -438,6 +451,7 @@ export function normalizeToShapeAndOptions(params: {
       value: { stdout: text, stderr: rawStderr, exitCode },
       options: lines.map((l) => ({ label: l, value: l })),
       resolvedShape: "stream",
+      primitive,
     };
   }
 
@@ -453,6 +467,7 @@ export function normalizeToShapeAndOptions(params: {
         },
         options: sv ? [{ label: sv, value: sv }] : [],
         resolvedShape: "scalar",
+        primitive: "Scalar",
       };
     }
     const prim =
@@ -463,6 +478,7 @@ export function normalizeToShapeAndOptions(params: {
       value: { value: prim, label: node?.title, tone: "neutral" },
       options: String(prim) ? [{ label: String(prim), value: String(prim) }] : [],
       resolvedShape: "scalar",
+      primitive: "Scalar",
     };
   }
 
@@ -504,27 +520,44 @@ export function normalizeToShapeAndOptions(params: {
         value: String(e.value),
       })),
       resolvedShape: "kv",
+      primitive,
     };
   }
 
   if (shape === "tree") {
-    const roots = buildTreeFromArbitraryData(data);
+    const roots =
+      Array.isArray(data) && node?.treeSpec?.groupBy && node.treeSpec.groupBy.length > 0
+        ? projectRecordsToTree(data as Record<string, unknown>[], node.treeSpec, node?.primaryKey || "id")
+        : buildTreeFromArbitraryData(data);
     const options = collectTreeLeafOptions(roots);
     return {
       value: { roots },
       options,
       resolvedShape: "tree",
+      primitive,
     };
   }
 
   if (shape === "graph") {
-    const rawNodes = Array.isArray(data?.nodes)
-      ? data.nodes
-      : Array.isArray(data)
-        ? data
-        : [];
-    const rawEdges = Array.isArray(data?.edges) ? data.edges : [];
-    const topo = computeGraphTopology(rawNodes, rawEdges);
+    let topo;
+    if (
+      Array.isArray(data) &&
+      (node?.graphSpec?.dependsOnKey || node?.graphSpec?.parentKey)
+    ) {
+      topo = projectRecordsToGraph(
+        data as Record<string, unknown>[],
+        node.graphSpec,
+        node?.primaryKey || "id"
+      );
+    } else {
+      const rawNodes = Array.isArray(data?.nodes)
+        ? data.nodes
+        : Array.isArray(data)
+          ? data
+          : [];
+      const rawEdges = Array.isArray(data?.edges) ? data.edges : [];
+      topo = computeGraphTopology(rawNodes, rawEdges);
+    }
     return {
       value: topo,
       options: topo.nodes.map((n) => ({
@@ -533,6 +566,7 @@ export function normalizeToShapeAndOptions(params: {
         meta: n.meta,
       })),
       resolvedShape: "graph",
+      primitive,
     };
   }
 
@@ -545,15 +579,10 @@ export function normalizeToShapeAndOptions(params: {
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
-    const items = arr.map((it: any) => {
-      if (typeof it === "object" && it !== null) {
-        const v = String(it[valCol] ?? it.value ?? it.name ?? it.id ?? JSON.stringify(it));
-        const l = String(it[lblCol] ?? it.label ?? it.title ?? v);
-        const m = metaCol && it[metaCol] !== undefined ? String(it[metaCol]) : it.meta ? String(it.meta) : undefined;
-        return { value: v, label: l, meta: m, raw: it };
-      }
-      return { value: String(it), label: String(it) };
-    });
+    const items =
+      arr.length > 0 && typeof arr[0] === "object" && arr[0] !== null
+        ? projectRecordsToList(arr as Record<string, unknown>[], node?.listSpec, node)
+        : arr.map((it: any) => ({ value: String(it), label: String(it) }));
     return {
       value: { items },
       options: items.map((it) => ({
@@ -562,6 +591,7 @@ export function normalizeToShapeAndOptions(params: {
         meta: it.meta,
       })),
       resolvedShape: "list",
+      primitive,
     };
   }
 
@@ -573,28 +603,16 @@ export function normalizeToShapeAndOptions(params: {
           ? data.rowKeys.map((rk: string) => ({ label: String(rk), value: String(rk) }))
           : [],
         resolvedShape: "matrix",
+        primitive,
       };
     }
     const rows: Record<string, any>[] = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
-    const rKey = node?.pivot?.rowKey || "row";
-    const cKey = node?.pivot?.colKey || "col";
-    const vKey = node?.pivot?.valueKey || "value";
-    const rowSet = new Set<string>();
-    const colSet = new Set<string>();
-    const cells: Record<string, Record<string, unknown>> = {};
-    for (const r of rows) {
-      const rk = String(r[rKey] ?? "");
-      const ck = String(r[cKey] ?? "");
-      if (!rk || !ck) continue;
-      rowSet.add(rk);
-      colSet.add(ck);
-      cells[rk] = cells[rk] || {};
-      cells[rk]![ck] = r[vKey];
-    }
+    const matrixPayload = projectRecordsToMatrix(rows, node?.pivot, node?.primaryKey || "id");
     return {
-      value: { rowKeys: [...rowSet], colKeys: [...colSet], cells },
-      options: [...rowSet].map((rk) => ({ label: rk, value: rk })),
+      value: matrixPayload,
+      options: matrixPayload.rowKeys.map((rk) => ({ label: rk, value: rk })),
       resolvedShape: "matrix",
+      primitive,
     };
   }
 
@@ -638,6 +656,7 @@ export function normalizeToShapeAndOptions(params: {
     },
     options,
     resolvedShape: "table",
+    primitive,
   };
 }
 
@@ -808,6 +827,12 @@ export class ReactiveGraphEngine {
           description: targetNode?.description,
           category: targetNode?.category,
           intermediate: Boolean(targetNode?.intermediate || (targetNode as any)?.hidden),
+          primitive: normalized.primitive,
+          views: targetNode?.views,
+          pivot: targetNode?.pivot,
+          treeSpec: targetNode?.treeSpec,
+          listSpec: targetNode?.listSpec,
+          graphSpec: targetNode?.graphSpec,
           rawParsed: parsed,
           consumedBy: this.getReverseConsumers(skill, intoDataId),
           resolvedSource: `(populated by action: ${actionId})`,
@@ -1053,6 +1078,12 @@ export class ReactiveGraphEngine {
           description: node.description,
           category: node.category,
           intermediate: Boolean(node.intermediate || (node as any).hidden),
+          primitive: normalized.primitive,
+          views: node.views,
+          pivot: node.pivot,
+          treeSpec: node.treeSpec,
+          listSpec: node.listSpec,
+          graphSpec: node.graphSpec,
           rawParsed: structuredData,
           consumedBy: this.getReverseConsumers(skill, node.id),
           resolvedEnv: {

@@ -14,7 +14,15 @@ import {
 } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
-import { interpolateBoundTriggerArgs, resolveDataSnapshotPath } from "../src/interpolator.ts";
+import {
+  inferDataPrimitive,
+  interpolateBoundTriggerArgs,
+  projectRecordsToGraph,
+  projectRecordsToList,
+  projectRecordsToMatrix,
+  projectRecordsToTree,
+  resolveDataSnapshotPath,
+} from "../src/interpolator.ts";
 import {
   buildManifestSymbolGraph,
   formatManifestMapReport,
@@ -2948,6 +2956,229 @@ actionGroups:
       const selfSkill = bootAfter.skills.find((s: any) => s.id === "skill-dashboard");
       expect(validateSkillManifest3Tier(primLabSkill)).toEqual([]);
       expect(validateSkillManifest3Tier(selfSkill)).toEqual([]);
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  test("19. Explicit 5-Primitive Typing (DataSnapshot.primitive), Declarative Multi-View Projection Specs (pivot Wide/Long, treeSpec, listSpec, graphSpec), Cross-View rawRow Action Inheritance, and Markdown adhoc-runbook Env Override", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-multiview-"));
+    const agentsDir = join(tmpBase, ".agents/skills");
+    mkdirSync(agentsDir, { recursive: true });
+    const repoSkillPath = resolve(import.meta.dir, "../skills/skill-dashboard");
+    symlinkSync(repoSkillPath, join(agentsDir, "skill-dashboard"));
+
+    const customSkillDir = join(agentsDir, "mv-lab");
+    mkdirSync(join(customSkillDir, ".dashboard"), { recursive: true });
+    const customWs = join(tmpBase, "custom-runbook-ws");
+    mkdirSync(customWs, { recursive: true });
+
+    writeFileSync(
+      join(customSkillDir, "SKILL.md"),
+      `---\nname: mv-lab\ndescription: Multi-View Projection Lab\n---\n# Multi-View Lab\n\`\`\`bash\necho "Running from markdown"\n\`\`\`\n`
+    );
+
+    const mvManifest = `
+id: mv-lab
+name: Multi-View Projection Lab
+category: Engineering Tools
+description: Verifies declarative multi-view specs and cross-view action inheritance
+data:
+  - id: tasks-records
+    title: "Pipeline Tasks"
+    runtime: ts
+    prelude: true
+    shape: table
+    views:
+      - table
+      - matrix
+      - tree
+      - list
+      - graph
+    primaryKey: id
+    pivot:
+      rowKey: id
+      colKeys:
+        - stage
+        - durationMs
+        - status
+      emptyValue: "0"
+    treeSpec:
+      groupBy:
+        - stage
+      labelKey: title
+      metaKey: status
+      valueKey: id
+    listSpec:
+      labelKey: title
+      metaKey: stage
+      valueKey: id
+      toneKey: tone
+    graphSpec:
+      idKey: id
+      labelKey: title
+      groupKey: stage
+      dependsOnKey: dependsOn
+    rowActions:
+      - label: "Inspect Task"
+        actionId: run-task
+        mode: run
+        args:
+          task_id: "{{row.id}}"
+          stage_name: "{{row.stage}}"
+    code: |
+      return [
+        { id: "t_ingest", title: "Ingest Raw", stage: "extract", durationMs: 120, status: "ready", tone: "success", dependsOn: [] },
+        { id: "t_clean", title: "Clean Records", stage: "transform", durationMs: 240, status: "ready", tone: "info", dependsOn: ["t_ingest"] },
+        { id: "t_publish", title: "Publish Mart", stage: "load", durationMs: 95, status: "warn", tone: "warn", dependsOn: ["t_clean"] }
+      ];
+actionGroups:
+  - name: "Task Operations"
+    actions:
+      - id: run-task
+        title: "Execute Pipeline Task"
+        danger: safe
+        command: "echo {{form.task_id}} {{form.stage_name}}"
+        form:
+          - key: task_id
+            label: "Task ID"
+            type: text
+            positional: true
+            required: true
+          - key: stage_name
+            label: "Stage"
+            type: text
+            positional: true
+`;
+    writeFileSync(join(customSkillDir, ".dashboard/manifest.yaml"), mvManifest.trim() + "\n");
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: tmpBase,
+      homeDir: tmpBase,
+    });
+
+    try {
+      // 1. Verify DataSnapshot.primitive across all 5 primitives on skill-dashboard & mv-lab
+      const sdRes = (await (await fetch(`${srv.url}/api/skills/skill-dashboard/data`)).json()) as any;
+      expect(sdRes.snapshots["studio-coverage-kpi"].primitive).toBe("Scalar");
+      expect(sdRes.snapshots["service-telemetry"].primitive).toBe("Document");
+      expect(sdRes.snapshots["skills-catalog-table"].primitive).toBe("Records");
+      expect(sdRes.snapshots["skill-reactive-graph"].primitive).toBe("Graph");
+      expect(sdRes.snapshots["ecosystem-health"].primitive).toBe("Raw");
+
+      // Verify declarative multi-view specs on skills-catalog-table
+      const sdCatSnap = sdRes.snapshots["skills-catalog-table"];
+      expect(sdCatSnap.pivot?.colKeys).toEqual(["status", "hasScripts", "totalRuns", "location"]);
+      expect(sdCatSnap.treeSpec?.groupBy).toEqual(["status"]);
+      expect(sdCatSnap.listSpec?.labelKey).toBe("id");
+
+      // 2. Verify mv-lab multi-view projections & cross-view rawRow action binding
+      const mvRes = (await (await fetch(`${srv.url}/api/skills/mv-lab/data`)).json()) as any;
+      const taskSnap = mvRes.snapshots["tasks-records"];
+      expect(taskSnap.status).toBe("ready");
+      expect(taskSnap.primitive).toBe("Records");
+      expect(taskSnap.views).toEqual(["table", "matrix", "tree", "list", "graph"]);
+      const rows = taskSnap.value.rows;
+      expect(rows.length).toBe(3);
+
+      // A. Wide-Table Attribute Matrix projection
+      const wideMat = projectRecordsToMatrix(rows, taskSnap.pivot, "id");
+      expect(wideMat.rowKeys).toEqual(["t_ingest", "t_clean", "t_publish"]);
+      expect(wideMat.colKeys).toEqual(["stage", "durationMs", "status"]);
+      expect(wideMat.cells["t_clean"]?.stage).toBe("transform");
+      expect(wideMat.rowRecordMap?.["t_clean"]?.title).toBe("Clean Records");
+
+      // B. Grouped Tree projection via treeSpec.groupBy
+      const groupedTree = projectRecordsToTree(rows, taskSnap.treeSpec, "id");
+      expect(groupedTree.length).toBe(3); // extract, transform, load
+      const transformGroup = groupedTree.find((g) => g.value === "transform");
+      expect(transformGroup).toBeDefined();
+      const cleanLeaf = transformGroup!.children![0]!;
+      expect(cleanLeaf.label).toBe("Clean Records");
+      expect(cleanLeaf.rawRow?.id).toBe("t_clean");
+
+      // C. List projection via listSpec
+      const projList = projectRecordsToList(rows, taskSnap.listSpec);
+      expect(projList[0]?.label).toBe("Ingest Raw");
+      expect(projList[0]?.meta).toBe("extract");
+      expect(projList[0]?.tone).toBe("success");
+      expect(projList[0]?.rawRow?.id).toBe("t_ingest");
+
+      // D. Graph projection from Records via graphSpec.dependsOnKey
+      const projGraph = projectRecordsToGraph(rows, taskSnap.graphSpec, "id");
+      expect(projGraph.nodes.length).toBe(3);
+      expect(projGraph.edges.length).toBe(2);
+      const ingestGNode = projGraph.nodes.find((n) => n.id === "t_ingest")!;
+      const publishGNode = projGraph.nodes.find((n) => n.id === "t_publish")!;
+      expect(ingestGNode.layer).toBe(0);
+      expect(publishGNode.layer).toBe(2);
+      expect(ingestGNode.downstreamIds).toEqual(["t_clean", "t_publish"]);
+
+      // E. Cross-view rowActions ({{row.id}}, {{row.stage}}) resolved from Tree leaf, Matrix cell, or Graph node
+      const rowActionArgs = taskSnap.rowActions[0].args;
+      expect(
+        interpolateBoundTriggerArgs(rowActionArgs, {
+          node: {
+            id: cleanLeaf.id,
+            label: cleanLeaf.label,
+            value: cleanLeaf.value,
+            rawRow: cleanLeaf.rawRow,
+          },
+        })
+      ).toEqual({
+        task_id: "t_clean",
+        stage_name: "transform",
+      });
+      expect(
+        interpolateBoundTriggerArgs(rowActionArgs, {
+          cell: {
+            rowKey: "t_publish",
+            colKey: "status",
+            value: "warn",
+            rawRow: wideMat.rowRecordMap?.["t_publish"],
+          },
+        })
+      ).toEqual({
+        task_id: "t_publish",
+        stage_name: "load",
+      });
+
+      // 3. Verify Markdown adhoc-runbook command environment override via /api/skills/:id/command-env and /api/preview-command
+      const putEnvRes = await fetch(`${srv.url}/api/skills/mv-lab/command-env`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetKind: "action",
+          targetId: "adhoc-runbook",
+          envConfig: {
+            cwd: customWs,
+            env: { RUNBOOK_FLAG: "enabled" },
+          },
+        }),
+      });
+      expect(putEnvRes.ok).toBe(true);
+
+      const previewAdhoc = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "mv-lab",
+            adHocCommand: "echo {{project_root}}",
+            formValues: {},
+          }),
+        })
+      ).json()) as any;
+      expect(previewAdhoc.cwd).toBe(customWs);
+      expect(previewAdhoc.resolvedEnv.isCustom).toBe(true);
+      expect(previewAdhoc.resolvedEnv.customEnvKeys).toContain("RUNBOOK_FLAG");
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

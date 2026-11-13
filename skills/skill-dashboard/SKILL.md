@@ -71,10 +71,10 @@ manifest-cli folder remove <dir_path>
    - Whenever authoring `runtime: ts` or `transform: ts` blocks that use `fs`, `path`, `os`, `Database`, `YAML`, or `$`, explicitly set `prelude: true` on the node (or `tsPrelude: true` at the manifest root).
 6. **Explicit `intermediate: true` Upstream DAG Nodes & `category` Grouping (No Duplicate Expensive Commands)**:
    - When multiple UI widgets (e.g. a `kv` summary card and a `table` detail card) derive from the same expensive CLI/Python/DB query, **never duplicate the shell command across multiple nodes**. Declare **1 upstream `intermediate: true` source node** + **N downstream `runtime: ts` view nodes** (`sync.dependsOn: ["<upstream_id>"]` reading `ctx.data["<upstream_id>"]`), and group related nodes with `category: "1. Domain Name"`.
-7. **Clean Raw Field Bindings for `rowActions` / `bulkActions` (In-Place Audit Ready)**:
-   - Clicking any `rowAction`, `bulkAction`, `quickAction`, or `cellAction` opens the **In-Place Bound Action Audit & Execution Modal (`BoundActionInspectorModal`)** showing the exact `Form Key` $\leftarrow$ `YAML Template` $\leftarrow$ `Resolved Value` mapping. If a table formats a display column (e.g. `doc_id: "#597"`), also include a clean raw field in each row object (e.g. `raw_doc_id: "597"`) and bind `args: { doc_id: "{{row.raw_doc_id}}" }` so CLI commands receive clean values, and ensure every `args` key matches a `form` field key on the target `ActionItem`.
+7. **Clean Raw Field Bindings for `rowActions` / `bulkActions` (Left-Click Run / Right-Click Audit)**:
+   - **Left-clicking** any bound action button (`rowActions`, `bulkActions`, `quickActions`, `nodeActions`, `cellAction`) immediately executes `safe` `run`-mode actions in the Web Terminal (when all required parameters and `preconditions` are satisfied), while **Right-clicking (`onContextMenu`)** opens the **In-Place Bound Action Audit & Execution Modal (`BoundActionInspectorModal`)** showing the exact `Form Key` $\leftarrow$ `YAML Template` $\leftarrow$ `Resolved Value` mapping. If a table formats a display column (e.g. `doc_id: "#597"`), also include a clean raw field in each row object (e.g. `raw_doc_id: "597"`) and bind `args: { doc_id: "{{row.raw_doc_id}}" }` so CLI commands receive clean values, and ensure every `args` key matches a `form` field key on the target `ActionItem`.
 8. **Two-Tier Execution Environment (`defaultWorkspace` Preference vs Per-Command `cwd` / `python` / `envFile` / `env`)**:
-   - Top-level `defaultWorkspace` (supports `~/...`, absolute paths, or paths relative to the skill directory such as `"../.."`) and `envVars` define the skill's default preference; individual `ActionItem`s and `DataNode`s targeting another microservice, repo, or `.env` file can declare their own `cwd`, `python`, `envFile`, and `env` (auto-detecting `.venv/bin/python` from the command's own `cwd` first, and editable in UI via `⚙️ Env`).
+   - Top-level `defaultWorkspace` (supports `~/...`, absolute paths, or paths relative to the skill directory such as `"../.."`) and `envVars` define the skill's default preference; individual `ActionItem`s and `DataNode`s targeting another microservice, repo, or `.env` file can declare their own `cwd`, `python`, `envFile`, and `env` (auto-detecting `.venv/bin/python` from the command's own `cwd` first, and editable in UI via the `⚙️ Env` button consolidated inside each command preview box across `ActionCard`, `DataNode -> Inspect -> Execution Source`, and executable shell blocks in `Knowledge & Docs`).
 
 ---
 
@@ -92,7 +92,7 @@ manifest-cli folder remove <dir_path>
 | `includes` / `defs` | `string[]` / `object` | No | Explicit modular YAML includes and reusable `$ref: "#/defs/<key>"` definitions. |
 | `envVars` | `SkillEnvVar[]` | No | Default environment variables preference (`Default Env (N)`), injected into commands unless overridden. |
 | `context` | `ContextField[]` | No | Global reactive state switchers (`select`, `toggle`, `text`) rendered in the top toolbar (`{{context.<key>}}`). |
-| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) decoupled into 5 data primitives and rendered via `scalar`, `kv` (with inline expandable nested JSON sub-trees), `tree`, `list`, `table`, `matrix`, `graph` (Kahn topological layering + upstream/downstream blast radius), `stream`, `raw`, or `auto` views with in-card View Switcher (`KV ⇄ Tree`, `Table ⇄ Matrix ⇄ List ⇄ Tree`, `Graph ⇄ Table ⇄ Tree`) and `selectContextKey` master-detail click drill-down. |
+| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) explicitly typed by **5 Data Primitives** (`Scalar`, `Records`, `Document`, `Graph`, `Raw`) and rendered via `scalar`, `kv` (with inline expandable nested JSON sub-trees), `tree`, `list`, `table`, `matrix`, `graph` (Kahn topological layering + upstream/downstream blast radius), `stream`, `raw`, or `auto` views. Supports declarative multi-view projection specs (`columns`, wide/long `pivot`, `treeSpec.groupBy`, `listSpec`, `graphSpec`, `views` whitelist), cross-view `rawRow` action inheritance, `selectContextKey` master-detail click drill-down, and a 3-mode Data Workbench (`Focus` with `📌 Pin` split-view / `Accordion` / `Grid`). |
 | `views` | `SkillView[]` | No | Markdown docs (`type: markdown`) and Custom HTML App Views (`type: html` with `window.SkillDashboard` Bridge 2.0). |
 | `actionGroups` | `ActionGroup[]` | No | Hierarchical operational groups (`Group` $\rightarrow$ `subgroup` $\rightarrow$ `ActionItem`). Supports per-action `cwd`/`python`/`envFile`/`env`, `preconditions` data-state guards, and `output.intoData` feedback loops. |
 
@@ -125,9 +125,9 @@ manifest-cli folder remove <dir_path>
   - `python`: Custom Python executable or auto-detected `.venv/bin/python` relative to the command's own `cwd`.
   - `envFile`: Optional `.env` dotenv file relative to the command's `cwd`.
   - `env`: Key-value environment variable overrides specific to that command.
-- **Interactive `⚙️ Env` Studio UI**:
-  - Every Action card and DataNode card features a compact `⚙️ Env` button.
-  - Displays `⚙️ Env` when inheriting defaults, and highlights with `⚙️ Custom Env` when overridden.
+- **Interactive `⚙️ Env` & White-Box `🔍 Inspect` Studio UI**:
+  - Every `ActionCard` and `DataNode` card header features a `🔍 Inspect` button exposing YAML provenance, raw templates, form `fromData` & upstream `DataNode` trigger bindings, and raw declarations.
+  - The `⚙️ Env` button is consolidated inside the command preview box (`ActionCard`'s `Live Workspace-Resolved Command` bar, `DataNode`'s `Inspect -> Execution Source` bar, and executable shell blocks in `Knowledge & Docs`).
   - Inline `CommandEnvEditor` panel provides directory autocomplete, quick-fill chips, and controls to Apply, Save to `manifest.yaml`, Reset to Default, or set `cwd` as the Skill Default Preference.
 
 ## 4. Progressive Knowledge References (Deep-Dive Manuals)

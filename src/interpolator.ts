@@ -5,14 +5,23 @@ import type {
   ActionItem,
   ActionPrecondition,
   CommandEnvConfig,
+  DataNode,
+  DataPrimitive,
   DataShape,
   DataSnapshot,
   FormField,
   FormFieldOption,
   GraphEdgeItem,
   GraphNodeItem,
+  GraphPayload,
+  GraphSpec,
+  ListItem,
+  ListSpec,
+  MatrixPayload,
+  MatrixPivot,
   ResolvedCommandEnvSummary,
   TreeNodeItem,
+  TreeSpec,
 } from "./types.ts";
 
 export function getDashboardEngineRoot(): string {
@@ -417,7 +426,7 @@ export function interpolateBoundTriggerArgs(
   bindingScope: {
     row?: Record<string, unknown>;
     selectedRows?: Record<string, unknown>[];
-    cell?: { rowKey: string; colKey: string; value: unknown };
+    cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
     node?: {
       id: string;
       label?: string;
@@ -425,6 +434,7 @@ export function interpolateBoundTriggerArgs(
       path?: string;
       upstreamIds?: string[];
       downstreamIds?: string[];
+      rawRow?: Record<string, unknown>;
     };
     contextValues?: Record<string, unknown>;
     dataSnapshots?: Record<string, DataSnapshot | undefined>;
@@ -433,6 +443,18 @@ export function interpolateBoundTriggerArgs(
   if (!rawArgs) return {};
   const out: Record<string, unknown> = {};
   const { row, selectedRows, cell, node, contextValues = {}, dataSnapshots = {} } = bindingScope;
+  const effectiveRow: Record<string, unknown> | undefined =
+    row || node?.rawRow || cell?.rawRow;
+  const fallbackPrimaryValue =
+    node?.value !== undefined && node?.value !== null
+      ? String(node.value)
+      : cell?.rowKey !== undefined
+        ? String(cell.rowKey)
+        : effectiveRow?.id !== undefined
+          ? String(effectiveRow.id)
+          : node?.id !== undefined
+            ? String(node.id)
+            : "";
 
   for (const [k, v] of Object.entries(rawArgs)) {
     if (typeof v !== "string") {
@@ -441,10 +463,12 @@ export function interpolateBoundTriggerArgs(
     }
 
     let str = v;
-    if (row) {
+    if (effectiveRow || node || cell) {
       str = str.replace(/\{\{\s*row\.([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, colKey) => {
-        const val = row[colKey];
-        return val !== undefined && val !== null ? String(val) : "";
+        if (effectiveRow && effectiveRow[colKey] !== undefined && effectiveRow[colKey] !== null) {
+          return String(effectiveRow[colKey]);
+        }
+        return fallbackPrimaryValue;
       });
     }
     if (selectedRows) {
@@ -456,23 +480,41 @@ export function interpolateBoundTriggerArgs(
           .join(",");
       });
     }
-    if (cell) {
+    if (cell || effectiveRow || node) {
+      const cRowKey =
+        cell?.rowKey ?? (effectiveRow?.id != null ? String(effectiveRow.id) : fallbackPrimaryValue);
+      const cColKey = cell?.colKey ?? "";
+      const cVal =
+        cell?.value !== undefined && cell?.value !== null
+          ? String(cell.value)
+          : fallbackPrimaryValue;
       str = str
-        .replace(/\{\{\s*cell\.rowKey\s*\}\}/g, String(cell.rowKey))
-        .replace(/\{\{\s*cell\.colKey\s*\}\}/g, String(cell.colKey))
-        .replace(/\{\{\s*cell\.value\s*\}\}/g, cell.value !== undefined && cell.value !== null ? String(cell.value) : "");
+        .replace(/\{\{\s*cell\.rowKey\s*\}\}/g, String(cRowKey))
+        .replace(/\{\{\s*cell\.colKey\s*\}\}/g, String(cColKey))
+        .replace(/\{\{\s*cell\.value\s*\}\}/g, cVal);
     }
-    if (node) {
+    if (node || effectiveRow || cell) {
+      const nId =
+        node?.id ?? (effectiveRow?.id != null ? String(effectiveRow.id) : fallbackPrimaryValue);
+      const nLabel =
+        node?.label ??
+        (effectiveRow?.title != null
+          ? String(effectiveRow.title)
+          : effectiveRow?.name != null
+            ? String(effectiveRow.name)
+            : String(nId));
+      const nVal =
+        node?.value !== undefined && node?.value !== null
+          ? String(node.value)
+          : fallbackPrimaryValue;
+      const nPath = node?.path ?? String(nId);
       str = str
-        .replace(/\{\{\s*node\.id\s*\}\}/g, String(node.id ?? ""))
-        .replace(/\{\{\s*node\.label\s*\}\}/g, String(node.label ?? node.id ?? ""))
-        .replace(
-          /\{\{\s*node\.value\s*\}\}/g,
-          node.value !== undefined && node.value !== null ? String(node.value) : ""
-        )
-        .replace(/\{\{\s*node\.path\s*\}\}/g, String(node.path ?? node.id ?? ""))
-        .replace(/\{\{\s*node\.upstreamIds\s*\}\}/g, (node.upstreamIds || []).join(","))
-        .replace(/\{\{\s*node\.downstreamIds\s*\}\}/g, (node.downstreamIds || []).join(","));
+        .replace(/\{\{\s*node\.id\s*\}\}/g, String(nId))
+        .replace(/\{\{\s*node\.label\s*\}\}/g, String(nLabel))
+        .replace(/\{\{\s*node\.value\s*\}\}/g, nVal)
+        .replace(/\{\{\s*node\.path\s*\}\}/g, String(nPath))
+        .replace(/\{\{\s*node\.upstreamIds\s*\}\}/g, (node?.upstreamIds || []).join(","))
+        .replace(/\{\{\s*node\.downstreamIds\s*\}\}/g, (node?.downstreamIds || []).join(","));
     }
     str = str.replace(/\{\{\s*context\.([a-zA-Z0-9_-]+)\s*\}\}/g, (_m, ctxKey) => {
       const val = contextValues[ctxKey];
@@ -837,6 +879,7 @@ export function normalizeExplicitTreeNodes(nodes: any[], parentPath = ""): TreeN
       path: currentPath,
       actionId: n.actionId,
       args: n.args,
+      rawRow: n.rawRow && typeof n.rawRow === "object" ? n.rawRow : undefined,
       children,
     };
   });
@@ -880,13 +923,21 @@ export function buildTreeFromArbitraryData(
           (item as any).id ||
           `[${idx}]`;
         const nodeId = String((item as any).id ?? currentPath);
+        const primaryVal = (item as any).id ?? (item as any).value ?? (item as any).name;
         return {
           id: nodeId,
           label: String(summary),
+          value:
+            typeof primaryVal === "string" ||
+            typeof primaryVal === "number" ||
+            typeof primaryVal === "boolean"
+              ? primaryVal
+              : undefined,
           path: currentPath,
           meta: Array.isArray(item)
             ? `${item.length} items`
             : `${Object.keys(item).length} keys`,
+          rawRow: !Array.isArray(item) ? (item as Record<string, unknown>) : undefined,
           children: buildTreeFromArbitraryData(item, currentPath, maxDepth, depth + 1),
         };
       }
@@ -966,6 +1017,7 @@ export function computeGraphTopology(
       layer: typeof n.layer === "number" ? n.layer : undefined,
       actionId: n.actionId,
       args: n.args,
+      rawRow: n.rawRow && typeof n.rawRow === "object" ? n.rawRow : n,
     });
   }
 
@@ -1158,3 +1210,347 @@ export function evaluateActionPrecondition(
 
   return { passed: true, actualSummary: targetVal };
 }
+
+export function inferDataPrimitive(shape: DataShape, rawParsed: unknown): DataPrimitive {
+  if (shape === "scalar") return "Scalar";
+  if (shape === "graph") return "Graph";
+  if (
+    rawParsed &&
+    typeof rawParsed === "object" &&
+    !Array.isArray(rawParsed) &&
+    Array.isArray((rawParsed as any).nodes) &&
+    Array.isArray((rawParsed as any).edges)
+  ) {
+    return "Graph";
+  }
+  if (Array.isArray(rawParsed)) {
+    if (isExplicitTreeNodeArray(rawParsed) && shape === "tree") {
+      return "Document";
+    }
+    return "Records";
+  }
+  if (rawParsed && typeof rawParsed === "object") {
+    const obj = rawParsed as Record<string, unknown>;
+    if (
+      "value" in obj &&
+      Object.keys(obj).every((k) => ["value", "label", "unit", "tone", "trend"].includes(k))
+    ) {
+      return "Scalar";
+    }
+    return "Document";
+  }
+  if (shape === "table" || shape === "matrix" || shape === "list" || shape === "stream") {
+    return "Records";
+  }
+  if (shape === "kv" || shape === "tree") return "Document";
+  return "Raw";
+}
+
+export function projectRecordsToMatrix(
+  rows: Record<string, unknown>[],
+  pivot?: MatrixPivot,
+  primaryKey = "id"
+): MatrixPayload {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { rowKeys: [], colKeys: [], cells: {}, rowRecordMap: {} };
+  }
+  const sample = rows[0] || {};
+  const keys = Object.keys(sample);
+  const rkField = pivot?.rowKey || (keys.includes(primaryKey) ? primaryKey : keys[0] || "id");
+  const emptyVal = pivot?.emptyValue ?? "—";
+
+  const uniqueRowKeys = new Set(
+    rows.map((r) => String(r[rkField] ?? "")).filter((s) => s.length > 0)
+  );
+  const isWideMode =
+    Array.isArray(pivot?.colKeys) && pivot.colKeys.length > 0
+      ? true
+      : !pivot?.colKey && (keys.length === 1 || (uniqueRowKeys.size === rows.length && keys.length > 1));
+
+  if (isWideMode) {
+    const colKeys =
+      pivot?.colKeys && pivot.colKeys.length > 0
+        ? pivot.colKeys
+        : keys.length === 1
+          ? [rkField]
+          : keys.filter((k) => k !== rkField).slice(0, 8);
+    const rowKeys: string[] = [];
+    const cells: Record<string, Record<string, unknown>> = {};
+    const rowRecordMap: Record<string, Record<string, unknown>> = {};
+    for (const r of rows) {
+      const rk = String(r[rkField] ?? "");
+      if (!rk) continue;
+      if (!cells[rk]) {
+        rowKeys.push(rk);
+        cells[rk] = {};
+        rowRecordMap[rk] = r;
+      }
+      for (const ck of colKeys) {
+        const v = r[ck];
+        cells[rk][ck] = v === undefined || v === null ? emptyVal : v;
+      }
+    }
+    return { rowKeys, colKeys, cells, rowRecordMap };
+  }
+
+  // Long-Table Pivot Mode (rowKey x colKey -> valueKey)
+  const otherKeys = keys.filter((k) => k !== rkField);
+  let ckField = pivot?.colKey;
+  if (!ckField) {
+    ckField = otherKeys[0] || rkField;
+    for (const k of otherKeys) {
+      const distinct = new Set(rows.map((r) => String(r[k] ?? ""))).size;
+      if (distinct >= 1 && distinct <= 12) {
+        ckField = k;
+        break;
+      }
+    }
+  }
+  const vkField =
+    pivot?.valueKey || otherKeys.find((k) => k !== ckField) || ckField || rkField;
+
+  const rowKeys: string[] = [];
+  const colKeys: string[] = [];
+  const cells: Record<string, Record<string, unknown>> = {};
+  const rowRecordMap: Record<string, Record<string, unknown>> = {};
+
+  for (const r of rows) {
+    const rk = String(r[rkField] ?? "");
+    const ck = String(r[ckField] ?? "");
+    const vk = r[vkField] !== undefined && r[vkField] !== null ? r[vkField] : emptyVal;
+    if (!rk || !ck) continue;
+    if (!rowKeys.includes(rk)) rowKeys.push(rk);
+    if (!colKeys.includes(ck)) colKeys.push(ck);
+    if (!cells[rk]) cells[rk] = {};
+    cells[rk][ck] = vk;
+    if (!rowRecordMap[rk]) rowRecordMap[rk] = r;
+  }
+
+  return { rowKeys, colKeys, cells, rowRecordMap };
+}
+
+export function projectRecordsToTree(
+  rows: Record<string, unknown>[],
+  spec?: TreeSpec,
+  primaryKey = "id"
+): TreeNodeItem[] {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const sample = rows[0] || {};
+  const keys = Object.keys(sample);
+  const valueKey =
+    spec?.valueKey || (keys.includes(primaryKey) ? primaryKey : keys[0] || "id");
+  const labelKey =
+    spec?.labelKey ||
+    (keys.includes("title")
+      ? "title"
+      : keys.includes("name")
+        ? "name"
+        : keys.includes("label")
+          ? "label"
+          : valueKey);
+  const metaKey = spec?.metaKey || keys.find((k) => k !== valueKey && k !== labelKey);
+  const groupBy = (spec?.groupBy || []).filter((g) => g.trim().length > 0);
+
+  if (groupBy.length === 0) {
+    return buildTreeFromArbitraryData(rows);
+  }
+
+  const buildLeaf = (row: Record<string, unknown>, idx: number, prefix: string): TreeNodeItem => {
+    const idVal = String(row[valueKey] ?? row[labelKey] ?? idx);
+    const labelVal = String(row[labelKey] ?? idVal);
+    const metaVal =
+      metaKey && row[metaKey] !== undefined && row[metaKey] !== null
+        ? `${metaKey}: ${String(row[metaKey])}`
+        : undefined;
+    const leafPath = prefix ? `${prefix}/${idVal}` : idVal;
+    const explicitChildArr =
+      spec?.childrenKey && Array.isArray(row[spec.childrenKey])
+        ? (row[spec.childrenKey] as Record<string, unknown>[])
+        : null;
+    const attrChildren: TreeNodeItem[] = explicitChildArr
+      ? explicitChildArr.map((childRow, cIdx) => buildLeaf(childRow, cIdx, leafPath))
+      : Object.entries(row)
+          .filter(([k]) => !groupBy.includes(k))
+          .map(([k, v]) => ({
+            id: `${leafPath}.${k}`,
+            label: k,
+            value: typeof v === "object" && v !== null ? JSON.stringify(v) : (v as any),
+            path: `${leafPath}.${k}`,
+            rawRow: row,
+          }));
+    return {
+      id: `${prefix}:${idVal}`,
+      label: labelVal,
+      value: idVal,
+      meta: metaVal,
+      path: leafPath,
+      rawRow: row,
+      children: attrChildren.length > 0 ? attrChildren : undefined,
+    };
+  };
+
+  const groupLevel = (
+    items: Record<string, unknown>[],
+    depth: number,
+    pathPrefix: string
+  ): TreeNodeItem[] => {
+    if (depth >= groupBy.length) {
+      return items.map((r, i) => buildLeaf(r, i, pathPrefix));
+    }
+    const gKey = groupBy[depth]!;
+    const buckets = new Map<string, Record<string, unknown>[]>();
+    for (const item of items) {
+      const k =
+        item[gKey] !== undefined && item[gKey] !== null && String(item[gKey]) !== ""
+          ? String(item[gKey])
+          : "Other";
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k)!.push(item);
+    }
+    return Array.from(buckets.entries()).map(([bucketVal, bucketRows]) => {
+      const curPath = pathPrefix ? `${pathPrefix}/${bucketVal}` : bucketVal;
+      const children = groupLevel(bucketRows, depth + 1, curPath);
+      return {
+        id: `group:${curPath}`,
+        label: `${gKey}: ${bucketVal}`,
+        value: bucketVal,
+        path: curPath,
+        meta: `${bucketRows.length} items`,
+        children,
+      };
+    });
+  };
+
+  return groupLevel(rows, 0, "");
+}
+
+export function projectRecordsToList(
+  rows: Record<string, unknown>[],
+  spec?: ListSpec,
+  node?: Partial<DataNode>
+): ListItem[] {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const sample = rows[0] || {};
+  const keys = Object.keys(sample);
+  const pk = node?.primaryKey || "id";
+  const vKey =
+    spec?.valueKey ||
+    node?.valueColumn ||
+    (keys.includes(pk)
+      ? pk
+      : keys.includes("value")
+        ? "value"
+        : keys.includes("name")
+          ? "name"
+          : keys[0] || "id");
+  const lKey =
+    spec?.labelKey ||
+    node?.labelColumn ||
+    (keys.includes("label")
+      ? "label"
+      : keys.includes("title")
+        ? "title"
+        : keys.includes("name")
+          ? "name"
+          : vKey);
+  const mKey =
+    spec?.metaKey ||
+    node?.metaColumn ||
+    keys.find((k) => k !== vKey && k !== lKey);
+  const toneKey = spec?.toneKey;
+
+  return rows.map((r, i) => {
+    if (r === null || typeof r !== "object") {
+      return { value: String(r), label: String(r), raw: r };
+    }
+    const val = String(r[vKey] ?? i);
+    const label = String(r[lKey] ?? val);
+    const meta =
+      mKey && r[mKey] !== undefined && r[mKey] !== null ? String(r[mKey]) : undefined;
+    const toneVal = toneKey && r[toneKey] ? String(r[toneKey]) : undefined;
+    const tone =
+      toneVal === "success" ||
+      toneVal === "warn" ||
+      toneVal === "danger" ||
+      toneVal === "info" ||
+      toneVal === "neutral"
+        ? toneVal
+        : undefined;
+    return {
+      value: val,
+      label,
+      meta,
+      tone,
+      raw: r,
+      rawRow: r,
+    };
+  });
+}
+
+export function projectRecordsToGraph(
+  rows: Record<string, unknown>[],
+  spec?: GraphSpec,
+  primaryKey = "id"
+): GraphPayload {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { nodes: [], edges: [] };
+  }
+  const sample = rows[0] || {};
+  const keys = Object.keys(sample);
+  const idKey = spec?.idKey || (keys.includes(primaryKey) ? primaryKey : keys[0] || "id");
+  const labelKey =
+    spec?.labelKey ||
+    (keys.includes("label")
+      ? "label"
+      : keys.includes("title")
+        ? "title"
+        : keys.includes("name")
+          ? "name"
+          : idKey);
+  const groupKey =
+    spec?.groupKey || (keys.includes("group") ? "group" : keys.includes("status") ? "status" : undefined);
+  const metaKey = spec?.metaKey || keys.find((k) => k !== idKey && k !== labelKey && k !== groupKey);
+  const depKey =
+    spec?.dependsOnKey ||
+    (keys.includes("dependsOn")
+      ? "dependsOn"
+      : keys.includes("dependencies")
+        ? "dependencies"
+        : undefined);
+  const parentKey =
+    spec?.parentKey || (keys.includes("parentId") ? "parentId" : keys.includes("parent") ? "parent" : undefined);
+
+  const rawNodes: any[] = [];
+  const rawEdges: any[] = [];
+
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const id = String(r[idKey] ?? "");
+    if (!id) continue;
+    rawNodes.push({
+      id,
+      label: String(r[labelKey] ?? id),
+      value: id,
+      group: groupKey && r[groupKey] != null ? String(r[groupKey]) : undefined,
+      meta: metaKey && r[metaKey] != null ? String(r[metaKey]) : undefined,
+      rawRow: r,
+    });
+    if (depKey && r[depKey] != null) {
+      const deps = Array.isArray(r[depKey])
+        ? (r[depKey] as unknown[]).map(String)
+        : String(r[depKey])
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+      for (const d of deps) {
+        rawEdges.push({ source: d, target: id, label: "dependsOn" });
+      }
+    }
+    if (parentKey && r[parentKey] != null && String(r[parentKey]).trim() !== "") {
+      rawEdges.push({ source: String(r[parentKey]).trim(), target: id, label: "parent" });
+    }
+  }
+
+  return computeGraphTopology(rawNodes, rawEdges);
+}
+
