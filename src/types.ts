@@ -165,8 +165,10 @@ export const DataShapeSchema = z.enum([
   "table",
   "matrix",
   "tree",
+  "graph",
   "stream",
   "raw",
+  "auto",
 ]);
 
 export type DataShape = z.infer<typeof DataShapeSchema>;
@@ -287,14 +289,30 @@ export const DataNodeSchema = z.object({
       valueKey: z.string(),
     })
     .optional(),
+  selectContextKey: z.string().optional(),
   quickActions: z.array(BoundActionTriggerSchema).optional(),
   rowActions: z.array(BoundActionTriggerSchema).optional(),
   bulkActions: z.array(BoundActionTriggerSchema).optional(),
   cellAction: BoundActionTriggerSchema.optional(),
+  nodeActions: z.array(BoundActionTriggerSchema).optional(),
   sync: DataSyncSchema.optional(),
 });
 
 export type DataNode = z.infer<typeof DataNodeSchema>;
+
+export const ActionPreconditionSchema = z.object({
+  dataNodeId: z.string(),
+  field: z.string().optional(),
+  equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  notEquals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  notEmpty: z.boolean().optional(),
+  minRows: z.number().optional(),
+  contains: z.string().optional(),
+  message: z.string(),
+  fixActionId: z.string().optional(),
+});
+
+export type ActionPrecondition = z.infer<typeof ActionPreconditionSchema>;
 
 export const ActionOutputSchema = z.object({
   intoData: z.string().optional(),
@@ -352,6 +370,7 @@ export const ActionItemSchema = z
     command: z.string().optional(),
     script: z.string().optional(),
     form: z.array(FormFieldSchema).optional(),
+    preconditions: z.array(ActionPreconditionSchema).optional(),
     artifacts: z.array(ArtifactRuleSchema).optional(),
     output: ActionOutputSchema.optional(),
   })
@@ -376,6 +395,7 @@ export interface ActionItem {
   command: string;
   script?: string;
   form?: FormField[];
+  preconditions?: ActionPrecondition[];
   artifacts?: ArtifactRule[];
   output?: ActionOutput;
 }
@@ -458,12 +478,56 @@ export interface KvEntry {
   key: string;
   label: string;
   value: string | number | boolean;
+  rawValue?: unknown;
   tone?: "neutral" | "info" | "success" | "warn" | "danger";
 }
 
 export interface KvPayload {
   entries: KvEntry[];
   record: Record<string, unknown>;
+}
+
+export interface TreeNodeItem {
+  id: string;
+  label: string;
+  value?: string | number | boolean;
+  meta?: string;
+  tone?: "neutral" | "info" | "success" | "warn" | "danger";
+  path?: string;
+  actionId?: string;
+  args?: Record<string, unknown>;
+  children?: TreeNodeItem[];
+}
+
+export interface TreePayload {
+  roots: TreeNodeItem[];
+}
+
+export interface GraphNodeItem {
+  id: string;
+  label: string;
+  value?: string;
+  meta?: string;
+  group?: string;
+  tone?: "neutral" | "info" | "success" | "warn" | "danger";
+  layer?: number;
+  upstreamIds?: string[];
+  downstreamIds?: string[];
+  actionId?: string;
+  args?: Record<string, unknown>;
+}
+
+export interface GraphEdgeItem {
+  source: string;
+  target: string;
+  label?: string;
+  animated?: boolean;
+  tone?: "neutral" | "info" | "success" | "warn" | "danger";
+}
+
+export interface GraphPayload {
+  nodes: GraphNodeItem[];
+  edges: GraphEdgeItem[];
 }
 
 export interface ListItem {
@@ -508,12 +572,23 @@ export interface DataSnapshot {
   shape: DataShape;
   runtime: DataRuntime;
   status: "idle" | "loading" | "streaming" | "ready" | "error";
-  value: ScalarPayload | KvPayload | ListPayload | TablePayload | MatrixPayload | RawPayload | any;
+  value:
+    | ScalarPayload
+    | KvPayload
+    | ListPayload
+    | TablePayload
+    | MatrixPayload
+    | TreePayload
+    | GraphPayload
+    | RawPayload
+    | any;
   options: FormFieldOption[];
+  selectContextKey?: string;
   quickActions?: BoundActionTrigger[];
   rowActions?: BoundActionTrigger[];
   bulkActions?: BoundActionTrigger[];
   cellAction?: BoundActionTrigger;
+  nodeActions?: BoundActionTrigger[];
   stdout: string;
   stderr: string;
   exitCode: number;

@@ -9,6 +9,9 @@ import {
   Copy,
   Database,
   Eye,
+  GitBranch,
+  Layers,
+  ListTree,
   Play,
   RefreshCw,
   Search,
@@ -17,8 +20,12 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
-import { interpolateBoundTriggerArgs } from "../interpolator.ts";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  buildTreeFromArbitraryData,
+  computeGraphTopology,
+  interpolateBoundTriggerArgs,
+} from "../interpolator.ts";
 import type {
   ActionGroup,
   ActionItem,
@@ -27,8 +34,12 @@ import type {
   CommandEnvConfig,
   ContextField,
   DataNode,
+  DataShape,
   DataSnapshot,
+  GraphEdgeItem,
+  GraphNodeItem,
   TableColumn,
+  TreeNodeItem,
 } from "../types.ts";
 import { ActionCard } from "./ActionCard.tsx";
 import { CommandEnvEditor } from "./CommandEnvEditor.tsx";
@@ -44,6 +55,7 @@ interface StatusProbesBarProps {
   commandEnvOverrides?: Record<string, CommandEnvConfig>;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onContextChanged?: (nextContext: Record<string, string | boolean>) => void;
+  onSnapshotsChanged?: (snapshots: Record<string, DataSnapshot>) => void;
   onLocateActionInPlayground?: (actionId: string, formValues: Record<string, unknown>) => void;
   onExecute?: (params: {
     actionId?: string;
@@ -63,11 +75,187 @@ interface StatusProbesBarProps {
 
 interface ActiveBoundActionAudit {
   node: DataNode;
-  triggerKind: "Row Action" | "Bulk Action" | "Quick Action" | "Cell Action";
+  triggerKind: "Row Action" | "Bulk Action" | "Quick Action" | "Cell Action" | "Node Action";
   trigger: BoundActionTrigger;
   resolvedArgs: Record<string, unknown>;
   scopeSummary?: string;
   seq: number;
+}
+
+function getAvailableViewsForNode(baseShape: DataShape, rawParsed: unknown): DataShape[] {
+  if (baseShape === "kv") return ["kv", "tree"];
+  if (baseShape === "tree") {
+    const isPlainObj =
+      rawParsed !== null && typeof rawParsed === "object" && !Array.isArray(rawParsed);
+    return isPlainObj ? ["tree", "kv"] : ["tree", "table"];
+  }
+  if (baseShape === "table" || baseShape === "matrix" || baseShape === "list") {
+    return ["table", "matrix", "list", "tree"];
+  }
+  if (baseShape === "graph") {
+    return ["graph", "table", "tree"];
+  }
+  return [];
+}
+
+function projectSnapshotToView(
+  node: DataNode,
+  snap: DataSnapshot | undefined,
+  effectiveShape: DataShape
+): any {
+  if (!snap || !snap.value) return null;
+  const baseShape = snap.shape || node.shape || "raw";
+  if (effectiveShape === baseShape) return snap.value;
+
+  const rawData = snap.rawParsed !== undefined ? snap.rawParsed : snap.value;
+
+  if (effectiveShape === "tree") {
+    return { roots: buildTreeFromArbitraryData(rawData) };
+  }
+
+  if (effectiveShape === "kv") {
+    const rec: Record<string, unknown> =
+      rawData && typeof rawData === "object" && !Array.isArray(rawData)
+        ? (rawData as Record<string, unknown>)
+        : { value: JSON.stringify(rawData) };
+    const entries = Object.entries(rec).map(([k, v]) => {
+      const isComplex = typeof v === "object" && v !== null;
+      return {
+        key: k,
+        label: k,
+        value: isComplex ? JSON.stringify(v) : (v as string | number | boolean),
+        rawValue: isComplex ? v : undefined,
+      };
+    });
+    return { entries, record: rec };
+  }
+
+  // Extract flat records array for table / list / matrix projections
+  const extractRows = (): Record<string, unknown>[] => {
+    if (Array.isArray(snap.value?.rows)) return snap.value.rows;
+    if (Array.isArray(snap.value?.nodes)) {
+      return snap.value.nodes.map((n: GraphNodeItem) => ({
+        id: n.id,
+        label: n.label,
+        layer: n.layer ?? 0,
+        group: n.group || "default",
+        upstreamCount: n.upstreamIds?.length || 0,
+        downstreamCount: n.downstreamIds?.length || 0,
+        downstreamIds: (n.downstreamIds || []).join(","),
+        meta: n.meta || "",
+      }));
+    }
+    if (Array.isArray(snap.value?.items)) {
+      return snap.value.items.map((it: any) =>
+        it.raw && typeof it.raw === "object"
+          ? it.raw
+          : { value: it.value, label: it.label, meta: it.meta }
+      );
+    }
+    if (Array.isArray(rawData)) {
+      return rawData.map((it) =>
+        it && typeof it === "object" ? (it as Record<string, unknown>) : { value: it }
+      );
+    }
+    if (snap.value?.rowKeys && snap.value?.colKeys && snap.value?.cells) {
+      const out: Record<string, unknown>[] = [];
+      for (const rk of snap.value.rowKeys) {
+        for (const ck of snap.value.colKeys) {
+          out.push({
+            row: rk,
+            col: ck,
+            value: snap.value.cells?.[rk]?.[ck] ?? "—",
+          });
+        }
+      }
+      return out;
+    }
+    return [];
+  };
+
+  if (effectiveShape === "list") {
+    const rows = extractRows();
+    const valCol = node.valueColumn || node.primaryKey || "id";
+    const lblCol = node.labelColumn || "label";
+    const metaCol = node.metaColumn || "status";
+    const items = rows.map((r) => {
+      const v = String(r[valCol] ?? r.value ?? r.name ?? r.id ?? JSON.stringify(r));
+      const l = String(r[lblCol] ?? r.label ?? r.title ?? r.name ?? v);
+      const m = r[metaCol] !== undefined ? String(r[metaCol]) : r.meta ? String(r.meta) : undefined;
+      return { value: v, label: l, meta: m, raw: r };
+    });
+    return { items };
+  }
+
+  if (effectiveShape === "table") {
+    const rows = extractRows();
+    const first = rows[0] || {};
+    const columns: TableColumn[] =
+      node.columns && node.columns.length > 0 && baseShape !== "graph"
+        ? node.columns
+        : Object.keys(first).map((k) => ({
+            key: k,
+            label: k,
+            type:
+              typeof first[k] === "boolean"
+                ? "boolean"
+                : typeof first[k] === "number"
+                  ? "number"
+                  : /status|state|tone|group/i.test(k)
+                    ? "badge"
+                    : /id|name|path|skill/i.test(k)
+                      ? "code"
+                      : "text",
+          }));
+    return {
+      columns,
+      rows,
+      primaryKey: node.primaryKey || columns[0]?.key || "id",
+    };
+  }
+
+  if (effectiveShape === "matrix") {
+    if (snap.value?.rowKeys && snap.value?.colKeys && snap.value?.cells) {
+      return snap.value;
+    }
+    const rows = extractRows();
+    const keys = rows[0] ? Object.keys(rows[0]) : [];
+    const rKey = node.pivot?.rowKey || node.primaryKey || keys[0] || "id";
+    const cKey =
+      node.pivot?.colKey ||
+      keys.find(
+        (k) =>
+          k !== rKey && /status|state|agent|location|category|group|type|has/i.test(k)
+      ) ||
+      keys[1] ||
+      rKey;
+    const vKey =
+      node.pivot?.valueKey ||
+      keys.find((k) => k !== rKey && k !== cKey && typeof rows[0]?.[k] === "number") ||
+      keys.find((k) => k !== rKey && k !== cKey) ||
+      "";
+    const rowSet = new Set<string>();
+    const colSet = new Set<string>();
+    const cells: Record<string, Record<string, unknown>> = {};
+    for (const r of rows) {
+      const rk = String(r[rKey] ?? "");
+      const ck = String(r[cKey] ?? "");
+      if (!rk || !ck) continue;
+      rowSet.add(rk);
+      colSet.add(ck);
+      cells[rk] = cells[rk] || {};
+      cells[rk]![ck] = vKey ? r[vKey] : "●";
+    }
+    return { rowKeys: [...rowSet], colKeys: [...colSet], cells };
+  }
+
+  if (effectiveShape === "graph") {
+    const rawNodes = Array.isArray((rawData as any)?.nodes) ? (rawData as any).nodes : [];
+    const rawEdges = Array.isArray((rawData as any)?.edges) ? (rawData as any).edges : [];
+    return computeGraphTopology(rawNodes, rawEdges);
+  }
+
+  return snap.value;
 }
 
 export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
@@ -80,6 +268,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   commandEnvOverrides,
   onSkillUpdated,
   onContextChanged,
+  onSnapshotsChanged,
   onLocateActionInPlayground,
   onExecute,
   onExecuteBoundTrigger,
@@ -99,6 +288,15 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   >({});
   const [copiedSourceNodeId, setCopiedSourceNodeId] = useState<string | null>(null);
   const [activeAudit, setActiveAudit] = useState<ActiveBoundActionAudit | null>(null);
+  const [viewModeOverride, setViewModeOverride] = useState<Record<string, DataShape>>({});
+  const [expandedKvPaths, setExpandedKvPaths] = useState<Record<string, boolean>>({});
+  const [collapsedTreeIds, setCollapsedTreeIds] = useState<Record<string, Set<string>>>({});
+  const [activeGraphNodeId, setActiveGraphNodeId] = useState<Record<string, string | null>>({});
+  const skipNextRefreshTriggerRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    onSnapshotsChanged?.(snapshots);
+  }, [snapshots]);
 
   const actionsMap = useMemo(() => {
     const map = new Map<string, { action: ActionItem; groupName: string }>();
@@ -279,6 +477,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         const body = await res.json();
         setContextState(body.context || {});
         setSnapshots(body.snapshots || {});
+        skipNextRefreshTriggerRef.current = true;
         onContextChanged?.(body.context || {});
       }
     } catch {
@@ -290,6 +489,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     setSelectedCategory("all");
     setSnapshots({});
     setSelectedRowKeys({});
+    setViewModeOverride({});
+    setExpandedKvPaths({});
+    setCollapsedTreeIds({});
+    setActiveGraphNodeId({});
     setOpenEnvNodeId(null);
     setInspectNodeId(null);
     setActiveAudit(null);
@@ -298,6 +501,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
 
   useEffect(() => {
     if (refreshTrigger > 0) {
+      if (skipNextRefreshTriggerRef.current) {
+        skipNextRefreshTriggerRef.current = false;
+        return;
+      }
       loadAll(true);
     }
   }, [refreshTrigger]);
@@ -333,6 +540,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       row?: Record<string, unknown>;
       selectedRows?: Record<string, unknown>[];
       cell?: { rowKey: string; colKey: string; value: unknown };
+      node?: {
+        id: string;
+        label?: string;
+        value?: unknown;
+        path?: string;
+        upstreamIds?: string[];
+        downstreamIds?: string[];
+      };
       scopeSummary?: string;
     }
   ) => {
@@ -359,6 +574,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       row?: Record<string, unknown>;
       selectedRows?: Record<string, unknown>[];
       cell?: { rowKey: string; colKey: string; value: unknown };
+      node?: {
+        id: string;
+        label?: string;
+        value?: unknown;
+        path?: string;
+        upstreamIds?: string[];
+        downstreamIds?: string[];
+      };
       scopeSummary?: string;
     },
     key: React.Key,
@@ -683,9 +906,22 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
             const snap = snapshots[node.id];
             const loading = Boolean(loadingMap[node.id]);
             const expanded = Boolean(expandedMap[node.id]);
-            const shape = snap?.shape || node.shape || "raw";
-            const isFullSpan = shape === "table" || shape === "matrix";
+            const baseShape = (snap?.shape || node.shape || "raw") as DataShape;
+            const availableViews = getAvailableViewsForNode(baseShape, snap?.rawParsed);
+            const shape = (viewModeOverride[node.id] || baseShape) as DataShape;
+            const projectedValue = projectSnapshotToView(node, snap, shape);
+            const isFullSpan =
+              shape === "table" || shape === "matrix" || shape === "graph" || shape === "tree";
             const isIntermediate = Boolean(node.intermediate || node.hidden);
+            const selectContextKey = snap?.selectContextKey || node.selectContextKey;
+            const activeMasterContextVal = selectContextKey
+              ? String(contextState[selectContextKey] ?? "all")
+              : null;
+            const handleMasterItemClick = (itemVal: string) => {
+              if (!selectContextKey || !itemVal) return;
+              const nextVal = activeMasterContextVal === itemVal ? "all" : itemVal;
+              updateContextField(selectContextKey, nextVal);
+            };
             const envSummary = snap?.resolvedEnv;
             const uiOverride = commandEnvOverrides?.[`data:${node.id}`];
             const isCustomEnv = Boolean(
@@ -710,7 +946,11 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 {/* Header */}
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                    {shape === "table" || shape === "matrix" ? (
+                    {shape === "graph" ? (
+                      <GitBranch className="w-4 h-4 text-indigo-500 shrink-0" />
+                    ) : shape === "tree" ? (
+                      <ListTree className="w-4 h-4 text-amber-500 shrink-0" />
+                    ) : shape === "table" || shape === "matrix" ? (
                       <Database className="w-4 h-4 text-sky-500 shrink-0" />
                     ) : (
                       <Activity className="w-4 h-4 text-emerald-500 shrink-0" />
@@ -726,6 +966,27 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                         🔬 INTERMEDIATE · DAG SOURCE
                       </span>
                     )}
+                    {selectContextKey && (
+                      <span
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30"
+                        title={`Master-Detail: clicking an item sets context.${selectContextKey}`}
+                      >
+                        <span>🔗 context.{selectContextKey}</span>
+                        {activeMasterContextVal && activeMasterContextVal !== "all" && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              updateContextField(selectContextKey, "all");
+                            }}
+                            className="ml-0.5 px-1 rounded bg-indigo-500/25 hover:bg-indigo-500/40 font-bold"
+                            title="Reset filter to 'all'"
+                          >
+                            ={activeMasterContextVal} ×
+                          </button>
+                        )}
+                      </span>
+                    )}
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono st-pill uppercase">
                       {node.runtime || "zsh"} · {shape}
                     </span>
@@ -736,8 +997,36 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                     )}
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {shape === "table" && (
+                  <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                    {/* Decoupled In-Card View Switcher (KV ⇄ Tree, Table ⇄ Matrix ⇄ List ⇄ Tree, Graph ⇄ Table ⇄ Tree) */}
+                    {availableViews.length > 1 && (
+                      <div
+                        className="inline-flex items-center rounded-lg p-0.5 st-subcard border st-border"
+                        title="Switch visual projection in-place without mutating backend data contracts"
+                      >
+                        {availableViews.map((vw) => {
+                          const isActiveView = shape === vw;
+                          return (
+                            <button
+                              key={vw}
+                              type="button"
+                              onClick={() =>
+                                setViewModeOverride((prev) => ({ ...prev, [node.id]: vw }))
+                              }
+                              className={`px-2 py-0.5 rounded-md text-[10.5px] font-mono font-bold uppercase transition-colors ${
+                                isActiveView
+                                  ? "bg-sky-600 text-white shadow-sm"
+                                  : "st-text-muted hover:st-text-primary"
+                              }`}
+                            >
+                              {vw}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {(shape === "table" || shape === "list" || shape === "tree") && (
                       <div className="relative">
                         <Search className="w-3.5 h-3.5 st-text-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
                         <input
@@ -746,8 +1035,8 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                           onChange={(e) =>
                             setTableSearch((prev) => ({ ...prev, [node.id]: e.target.value }))
                           }
-                          placeholder="Filter rows..."
-                          className="pl-7 pr-2.5 py-1 rounded-lg st-input text-xs w-40 focus:outline-none focus:border-sky-500"
+                          placeholder={`Filter ${shape}...`}
+                          className="pl-7 pr-2.5 py-1 rounded-lg st-input text-xs w-36 focus:outline-none focus:border-sky-500"
                         />
                       </div>
                     )}
@@ -773,6 +1062,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                             (node.quickActions?.length || 0) +
                             (node.rowActions?.length || 0) +
                             (node.bulkActions?.length || 0) +
+                            (node.nodeActions?.length || 0) +
                             (node.cellAction ? 1 : 0);
                           return totalBound > 0 ? ` (${totalBound})` : "";
                         })()}
@@ -833,6 +1123,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                       })),
                       ...(node.bulkActions || []).map((t) => ({
                         kind: "Bulk Action" as const,
+                        trigger: t,
+                      })),
+                      ...(node.nodeActions || []).map((t) => ({
+                        kind: "Node Action" as const,
                         trigger: t,
                       })),
                       ...(node.cellAction
@@ -1250,48 +1544,715 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                       {snap.error || snap.stderr || snap.stdout || "Execution failed"}
                     </pre>
                   </div>
-                ) : shape === "scalar" && snap?.value ? (
+                ) : shape === "scalar" && projectedValue ? (
                   <div className="st-subcard rounded-xl p-4 flex items-baseline gap-2.5">
                     <span
                       className={`text-2xl font-extrabold font-mono ${
-                        snap.value.tone === "success"
+                        projectedValue.tone === "success"
                           ? "text-emerald-600 dark:text-emerald-400"
-                          : snap.value.tone === "warn"
+                          : projectedValue.tone === "warn"
                             ? "text-amber-600 dark:text-amber-400"
-                            : snap.value.tone === "danger"
+                            : projectedValue.tone === "danger"
                               ? "text-rose-600 dark:text-rose-400"
                               : "st-text-primary"
                       }`}
                     >
-                      {String(snap.value.value ?? "—")}
+                      {String(projectedValue.value ?? "—")}
                     </span>
-                    {snap.value.unit && (
+                    {projectedValue.unit && (
                       <span className="text-xs font-semibold st-text-secondary">
-                        {snap.value.unit}
+                        {projectedValue.unit}
                       </span>
                     )}
                   </div>
-                ) : shape === "kv" && snap?.value?.entries ? (
+                ) : shape === "kv" && projectedValue?.entries ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {snap.value.entries.map((entry: any) => (
-                      <div
-                        key={entry.key}
-                        className="st-subcard rounded-xl px-3 py-2 flex items-center justify-between gap-2"
-                      >
-                        <span className="text-xs font-medium st-text-secondary truncate">
-                          {entry.label || entry.key}
-                        </span>
-                        <code className="text-xs font-mono font-semibold st-text-primary truncate">
-                          {String(entry.value ?? "")}
-                        </code>
-                      </div>
-                    ))}
+                    {projectedValue.entries.map((entry: any) => {
+                      const hasNested = entry.rawValue !== undefined && entry.rawValue !== null;
+                      const kvKey = `${node.id}:${entry.key}`;
+                      const isNestedOpen = Boolean(expandedKvPaths[kvKey]);
+                      const nestedSummary = hasNested
+                        ? Array.isArray(entry.rawValue)
+                          ? `[${entry.rawValue.length} items]`
+                          : `{${Object.keys(entry.rawValue).length} keys}`
+                        : "";
+                      return (
+                        <div
+                          key={entry.key}
+                          className={`st-subcard rounded-xl px-3 py-2 flex flex-col gap-1.5 ${
+                            hasNested && isNestedOpen ? "sm:col-span-2" : ""
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium st-text-secondary truncate">
+                              {entry.label || entry.key}
+                            </span>
+                            {hasNested ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedKvPaths((prev) => ({
+                                    ...prev,
+                                    [kvKey]: !isNestedOpen,
+                                  }))
+                                }
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-mono font-semibold bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 transition-colors"
+                                title="Click to expand/collapse lossless nested JSON sub-tree"
+                              >
+                                {isNestedOpen ? (
+                                  <ChevronDown className="w-3 h-3" />
+                                ) : (
+                                  <ChevronRight className="w-3 h-3" />
+                                )}
+                                <span>{nestedSummary}</span>
+                              </button>
+                            ) : (
+                              <code className="text-xs font-mono font-semibold st-text-primary truncate">
+                                {String(entry.value ?? "")}
+                              </code>
+                            )}
+                          </div>
+                          {hasNested && isNestedOpen && (
+                            <div className="st-code-surface rounded-lg border st-border p-2.5 text-xs font-mono space-y-1 max-h-52 overflow-y-auto">
+                              {buildTreeFromArbitraryData(entry.rawValue, entry.key).map((sub) => (
+                                <div key={sub.id} className="flex flex-col gap-0.5">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-sky-600 dark:text-sky-400 font-semibold">
+                                      {sub.label}:
+                                    </span>
+                                    <span className="st-text-primary break-all">
+                                      {sub.value !== undefined
+                                        ? String(sub.value)
+                                        : sub.meta || ""}
+                                    </span>
+                                  </div>
+                                  {sub.children && sub.children.length > 0 && (
+                                    <div className="pl-3 border-l st-border space-y-0.5">
+                                      {sub.children.map((ch) => (
+                                        <div
+                                          key={ch.id}
+                                          className="flex items-center justify-between gap-2 text-[11px]"
+                                        >
+                                          <span className="st-text-secondary">{ch.label}:</span>
+                                          <span className="st-text-primary break-all">
+                                            {ch.value !== undefined
+                                              ? String(ch.value)
+                                              : JSON.stringify(ch.children || ch.meta)}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                ) : (shape === "table" || (shape === "stream" && Array.isArray(snap?.value?.rows))) && snap?.value ? (
+                ) : shape === "list" && projectedValue?.items ? (
                   (() => {
-                    const cols: TableColumn[] = snap.value.columns || node.columns || [];
-                    const allRows: Record<string, unknown>[] = snap.value.rows || [];
-                    const pk = snap.value.primaryKey || node.primaryKey || cols[0]?.key || "id";
+                    const allItems: any[] = projectedValue.items || [];
+                    const q = (tableSearch[node.id] || "").trim().toLowerCase();
+                    const filteredItems = q
+                      ? allItems.filter(
+                          (it) =>
+                            String(it.label ?? "")
+                              .toLowerCase()
+                              .includes(q) ||
+                            String(it.value ?? "")
+                              .toLowerCase()
+                              .includes(q) ||
+                            String(it.meta ?? "")
+                              .toLowerCase()
+                              .includes(q)
+                        )
+                      : allItems;
+                    const itemActions = [
+                      ...(node.rowActions || []),
+                      ...(node.nodeActions || []),
+                    ];
+                    return (
+                      <div className="flex flex-wrap gap-2 max-h-72 overflow-y-auto p-1">
+                        {filteredItems.length === 0 ? (
+                          <div className="w-full p-3 text-xs st-text-muted text-center">
+                            No matching list items.
+                          </div>
+                        ) : (
+                          filteredItems.map((it, idx) => {
+                            const itemVal = String(it.value ?? idx);
+                            const isSelectedMaster =
+                              Boolean(selectContextKey) && activeMasterContextVal === itemVal;
+                            const rawRow =
+                              it.raw && typeof it.raw === "object"
+                                ? (it.raw as Record<string, unknown>)
+                                : { id: itemVal, value: itemVal, label: it.label, meta: it.meta };
+                            return (
+                              <div
+                                key={`${itemVal}-${idx}`}
+                                onClick={() => {
+                                  if (selectContextKey) handleMasterItemClick(itemVal);
+                                }}
+                                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs transition-all ${
+                                  selectContextKey ? "cursor-pointer" : ""
+                                } ${
+                                  isSelectedMaster
+                                    ? "bg-sky-500/15 border-sky-500 text-sky-700 dark:text-sky-300 font-bold shadow-sm"
+                                    : "st-subcard st-border hover:border-sky-500/40"
+                                }`}
+                              >
+                                <code className="font-mono font-semibold st-text-primary">
+                                  {it.label || itemVal}
+                                </code>
+                                {it.meta && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono st-pill">
+                                    {it.meta}
+                                  </span>
+                                )}
+                                {itemActions.map((act, aIdx) => (
+                                  <span key={aIdx} onClick={(e) => e.stopPropagation()}>
+                                    {renderBoundTriggerButton(
+                                      node,
+                                      "Row Action",
+                                      act,
+                                      {
+                                        row: rawRow,
+                                        node: {
+                                          id: itemVal,
+                                          label: String(it.label || itemVal),
+                                          value: itemVal,
+                                        },
+                                        scopeSummary: `List Item ${it.label || itemVal}`,
+                                      },
+                                      aIdx,
+                                      "secondary"
+                                    )}
+                                  </span>
+                                ))}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    );
+                  })()
+                ) : shape === "tree" && projectedValue?.roots ? (
+                  (() => {
+                    const roots: TreeNodeItem[] = projectedValue.roots || [];
+                    const q = (tableSearch[node.id] || "").trim().toLowerCase();
+                    const collapsedSet = collapsedTreeIds[node.id] || new Set<string>();
+                    const nodeActions = node.nodeActions || node.rowActions || [];
+
+                    const collectExpandableIds = (items: TreeNodeItem[]): string[] => {
+                      const ids: string[] = [];
+                      for (const it of items) {
+                        if (it.children && it.children.length > 0) {
+                          ids.push(it.id);
+                          ids.push(...collectExpandableIds(it.children));
+                        }
+                      }
+                      return ids;
+                    };
+
+                    const matchesQuery = (it: TreeNodeItem): boolean => {
+                      if (!q) return true;
+                      if (
+                        it.label.toLowerCase().includes(q) ||
+                        String(it.value ?? "")
+                          .toLowerCase()
+                          .includes(q) ||
+                        String(it.meta ?? "")
+                          .toLowerCase()
+                          .includes(q) ||
+                        String(it.path ?? "")
+                          .toLowerCase()
+                          .includes(q)
+                      ) {
+                        return true;
+                      }
+                      return Boolean(it.children && it.children.some(matchesQuery));
+                    };
+
+                    const renderTreeNodes = (
+                      items: TreeNodeItem[],
+                      depth = 0
+                    ): React.ReactNode => {
+                      return items.filter(matchesQuery).map((item) => {
+                        const hasChildren = Boolean(item.children && item.children.length > 0);
+                        const isCollapsed = !q && collapsedSet.has(item.id);
+                        const isSelectedMaster =
+                          Boolean(selectContextKey) && activeMasterContextVal === item.id;
+                        return (
+                          <div key={item.id} className="flex flex-col">
+                            <div
+                              onClick={() => {
+                                if (selectContextKey) {
+                                  handleMasterItemClick(item.id);
+                                } else if (hasChildren) {
+                                  const next = new Set(collapsedSet);
+                                  if (next.has(item.id)) next.delete(item.id);
+                                  else next.add(item.id);
+                                  setCollapsedTreeIds((prev) => ({
+                                    ...prev,
+                                    [node.id]: next,
+                                  }));
+                                }
+                              }}
+                              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                                isSelectedMaster
+                                  ? "bg-sky-500/15 border border-sky-500/40 font-bold"
+                                  : "hover:st-surface-muted"
+                              } ${selectContextKey || hasChildren ? "cursor-pointer" : ""}`}
+                              style={{ paddingLeft: `${depth * 18 + 8}px` }}
+                            >
+                              <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                {hasChildren ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const next = new Set(collapsedSet);
+                                      if (next.has(item.id)) next.delete(item.id);
+                                      else next.add(item.id);
+                                      setCollapsedTreeIds((prev) => ({
+                                        ...prev,
+                                        [node.id]: next,
+                                      }));
+                                    }}
+                                    className="p-0.5 rounded hover:bg-black/10"
+                                  >
+                                    {isCollapsed ? (
+                                      <ChevronRight className="w-3.5 h-3.5 st-text-muted" />
+                                    ) : (
+                                      <ChevronDown className="w-3.5 h-3.5 text-sky-500" />
+                                    )}
+                                  </button>
+                                ) : (
+                                  <span className="w-4 inline-block text-center st-text-muted">
+                                    •
+                                  </span>
+                                )}
+                                <span className="font-mono font-semibold st-text-primary">
+                                  {item.label}
+                                </span>
+                                {item.value !== undefined && (
+                                  <code className="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 dark:text-sky-300 font-mono text-[11px]">
+                                    {String(item.value)}
+                                  </code>
+                                )}
+                                {item.meta && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10.5px] font-mono st-pill">
+                                    {item.meta}
+                                  </span>
+                                )}
+                                {item.path && item.path !== item.label && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono st-text-muted bg-black/5 dark:bg-white/5">
+                                    {item.path}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div
+                                className="flex items-center gap-1.5 shrink-0"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {item.actionId && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      triggerBound(
+                                        node,
+                                        "Node Action",
+                                        {
+                                          label: item.label,
+                                          actionId: item.actionId!,
+                                          mode: "run",
+                                          args: item.args,
+                                        },
+                                        {
+                                          node: {
+                                            id: item.id,
+                                            label: item.label,
+                                            value: item.value,
+                                            path: item.path,
+                                          },
+                                          scopeSummary: `Tree Node ${item.path || item.id}`,
+                                        }
+                                      )
+                                    }
+                                    className="px-2 py-0.5 rounded st-btn-secondary font-mono text-[11px]"
+                                  >
+                                    → {item.actionId}
+                                  </button>
+                                )}
+                                {nodeActions.map((na, nIdx) =>
+                                  renderBoundTriggerButton(
+                                    node,
+                                    "Node Action",
+                                    na,
+                                    {
+                                      row: {
+                                        id: item.id,
+                                        label: item.label,
+                                        value: item.value,
+                                        path: item.path,
+                                      },
+                                      node: {
+                                        id: item.id,
+                                        label: item.label,
+                                        value: item.value,
+                                        path: item.path,
+                                      },
+                                      scopeSummary: `Tree Node ${item.path || item.id}`,
+                                    },
+                                    nIdx,
+                                    "secondary"
+                                  )
+                                )}
+                              </div>
+                            </div>
+                            {hasChildren && !isCollapsed && (
+                              <div className="flex flex-col">
+                                {renderTreeNodes(item.children!, depth + 1)}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      });
+                    };
+
+                    return (
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center justify-between gap-2 text-[11px] st-text-muted px-1">
+                          <span>{roots.length} root node(s)</span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setCollapsedTreeIds((prev) => ({
+                                  ...prev,
+                                  [node.id]: new Set(),
+                                }))
+                              }
+                              className="px-2 py-0.5 rounded st-btn-secondary font-semibold"
+                            >
+                              Expand All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setCollapsedTreeIds((prev) => ({
+                                  ...prev,
+                                  [node.id]: new Set(collectExpandableIds(roots)),
+                                }))
+                              }
+                              className="px-2 py-0.5 rounded st-btn-secondary font-semibold"
+                            >
+                              Collapse All
+                            </button>
+                          </div>
+                        </div>
+                        <div className="rounded-xl border st-border st-subcard p-2 max-h-80 overflow-y-auto divide-y st-border/40">
+                          {roots.length === 0 ? (
+                            <div className="p-3 text-xs st-text-muted text-center">
+                              Empty tree.
+                            </div>
+                          ) : (
+                            renderTreeNodes(roots, 0)
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : shape === "graph" && projectedValue?.nodes ? (
+                  (() => {
+                    const gNodes: GraphNodeItem[] = projectedValue.nodes || [];
+                    const gEdges: GraphEdgeItem[] = projectedValue.edges || [];
+                    const nodeActions = node.nodeActions || node.rowActions || [];
+                    const selectedNodeId = activeGraphNodeId[node.id] || null;
+                    const focusedNode = gNodes.find((n) => n.id === selectedNodeId) || null;
+                    const upstreamSet = new Set(focusedNode?.upstreamIds || []);
+                    const downstreamSet = new Set(focusedNode?.downstreamIds || []);
+
+                    // Group nodes by topological layer
+                    const layersMap = new Map<number, GraphNodeItem[]>();
+                    let maxLayer = 0;
+                    for (const gn of gNodes) {
+                      const l = gn.layer ?? 0;
+                      if (l > maxLayer) maxLayer = l;
+                      const list = layersMap.get(l) || [];
+                      list.push(gn);
+                      layersMap.set(l, list);
+                    }
+
+                    const COL_W = 216;
+                    const COL_GAP = 76;
+                    const ROW_H = 82;
+                    const ROW_GAP = 18;
+                    const PAD_X = 20;
+                    const PAD_Y = 24;
+
+                    let maxRowsInCol = 1;
+                    for (const list of layersMap.values()) {
+                      if (list.length > maxRowsInCol) maxRowsInCol = list.length;
+                    }
+
+                    const canvasW = Math.max(
+                      520,
+                      PAD_X * 2 + (maxLayer + 1) * COL_W + maxLayer * COL_GAP
+                    );
+                    const canvasH = Math.max(
+                      200,
+                      PAD_Y * 2 + maxRowsInCol * ROW_H + Math.max(0, maxRowsInCol - 1) * ROW_GAP
+                    );
+
+                    const coords = new Map<string, { x: number; y: number }>();
+                    for (let l = 0; l <= maxLayer; l++) {
+                      const colNodes = layersMap.get(l) || [];
+                      colNodes.forEach((gn, idx) => {
+                        coords.set(gn.id, {
+                          x: PAD_X + l * (COL_W + COL_GAP),
+                          y: PAD_Y + idx * (ROW_H + ROW_GAP),
+                        });
+                      });
+                    }
+
+                    return (
+                      <div className="flex flex-col gap-2.5">
+                        {/* Impact & Blast Radius Bar */}
+                        <div className="flex items-center justify-between gap-2 flex-wrap px-3 py-2 rounded-xl st-subcard border st-border text-xs">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-semibold st-text-primary">
+                              {gNodes.length} Nodes · {gEdges.length} Directed Edges ·{" "}
+                              {maxLayer + 1} Topological Layer(s)
+                            </span>
+                            {focusedNode ? (
+                              <>
+                                <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 font-mono font-bold">
+                                  Selected: {focusedNode.label}
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 font-mono">
+                                  Upstream ({focusedNode.upstreamIds?.length || 0}):{" "}
+                                  {focusedNode.upstreamIds?.join(", ") || "none"}
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
+                                  Impact Radius ({focusedNode.downstreamIds?.length || 0}):{" "}
+                                  {focusedNode.downstreamIds?.join(", ") || "none"}
+                                </span>
+                              </>
+                            ) : (
+                              <span className="st-text-muted">
+                                Click any node to highlight its upstream dependencies & downstream blast radius
+                              </span>
+                            )}
+                          </div>
+
+                          {focusedNode && (
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {focusedNode.actionId &&
+                                renderBoundTriggerButton(
+                                  node,
+                                  "Node Action",
+                                  {
+                                    label: focusedNode.label,
+                                    actionId: focusedNode.actionId,
+                                    mode: "run",
+                                    args: focusedNode.args,
+                                  },
+                                  {
+                                    row: {
+                                      id: focusedNode.id,
+                                      label: focusedNode.label,
+                                      value: focusedNode.value || focusedNode.id,
+                                    },
+                                    node: focusedNode,
+                                    scopeSummary: `Graph Node ${focusedNode.id} (per-node actionId)`,
+                                  },
+                                  `per-node-${focusedNode.id}`,
+                                  "primary"
+                                )}
+                              {nodeActions.map((na, nIdx) =>
+                                renderBoundTriggerButton(
+                                  node,
+                                  "Node Action",
+                                  na,
+                                  {
+                                    row: {
+                                      id: focusedNode.id,
+                                      label: focusedNode.label,
+                                      value: focusedNode.value || focusedNode.id,
+                                    },
+                                    node: focusedNode,
+                                    scopeSummary: `Graph Node ${focusedNode.id} (Impact: ${
+                                      focusedNode.downstreamIds?.length || 0
+                                    })`,
+                                  },
+                                  nIdx,
+                                  "primary"
+                                )
+                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setActiveGraphNodeId((prev) => ({
+                                    ...prev,
+                                    [node.id]: null,
+                                  }))
+                                }
+                                className="px-2 py-1 rounded-lg st-btn-secondary font-semibold"
+                              >
+                                Clear Focus
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Layered Directed Graph SVG + Card Canvas */}
+                        <div className="rounded-xl border st-border st-code-surface overflow-x-auto overflow-y-auto max-h-[420px]">
+                          <div
+                            className="relative select-none"
+                            style={{ width: `${canvasW}px`, height: `${canvasH}px` }}
+                          >
+                            <svg
+                              width={canvasW}
+                              height={canvasH}
+                              className="absolute inset-0 pointer-events-none"
+                            >
+                              <defs>
+                                <marker
+                                  id={`arrow-${node.id}`}
+                                  viewBox="0 0 10 10"
+                                  refX="8"
+                                  refY="5"
+                                  markerWidth="6"
+                                  markerHeight="6"
+                                  orient="auto-start-reverse"
+                                >
+                                  <path d="M 0 1 L 10 5 L 0 9 z" fill="#0ea5e9" />
+                                </marker>
+                              </defs>
+                              {gEdges.map((edge, eIdx) => {
+                                const srcPos = coords.get(edge.source);
+                                const tgtPos = coords.get(edge.target);
+                                if (!srcPos || !tgtPos) return null;
+                                const x1 = srcPos.x + COL_W;
+                                const y1 = srcPos.y + ROW_H / 2;
+                                const x2 = tgtPos.x;
+                                const y2 = tgtPos.y + ROW_H / 2;
+                                const dx = Math.max(40, Math.abs(x2 - x1) * 0.5);
+                                const pathD = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
+                                  x2 - dx
+                                } ${y2}, ${x2} ${y2}`;
+
+                                const isHighlighted =
+                                  !focusedNode ||
+                                  (edge.source === focusedNode.id &&
+                                    downstreamSet.has(edge.target)) ||
+                                  (edge.target === focusedNode.id &&
+                                    upstreamSet.has(edge.source)) ||
+                                  (upstreamSet.has(edge.source) &&
+                                    upstreamSet.has(edge.target)) ||
+                                  (downstreamSet.has(edge.source) &&
+                                    downstreamSet.has(edge.target));
+
+                                return (
+                                  <g
+                                    key={`${edge.source}->${edge.target}-${eIdx}`}
+                                    opacity={isHighlighted ? 0.95 : 0.22}
+                                  >
+                                    <path
+                                      d={pathD}
+                                      fill="none"
+                                      stroke="#0ea5e9"
+                                      strokeWidth={
+                                        focusedNode && isHighlighted ? 2.4 : 1.5
+                                      }
+                                      markerEnd={`url(#arrow-${node.id})`}
+                                    />
+                                    {edge.label && (
+                                      <text
+                                        x={(x1 + x2) / 2}
+                                        y={(y1 + y2) / 2 - 6}
+                                        textAnchor="middle"
+                                        className="fill-sky-600 dark:fill-sky-400 text-[9.5px] font-mono"
+                                      >
+                                        {edge.label}
+                                      </text>
+                                    )}
+                                  </g>
+                                );
+                              })}
+                            </svg>
+
+                            {gNodes.map((gn) => {
+                              const pos = coords.get(gn.id);
+                              if (!pos) return null;
+                              const isSelected = selectedNodeId === gn.id;
+                              const isUpstream = upstreamSet.has(gn.id);
+                              const isDownstream = downstreamSet.has(gn.id);
+                              const isDimmed =
+                                Boolean(focusedNode) &&
+                                !isSelected &&
+                                !isUpstream &&
+                                !isDownstream;
+
+                              return (
+                                <div
+                                  key={gn.id}
+                                  onClick={() => {
+                                    setActiveGraphNodeId((prev) => ({
+                                      ...prev,
+                                      [node.id]: isSelected ? null : gn.id,
+                                    }));
+                                    if (selectContextKey) {
+                                      handleMasterItemClick(gn.value || gn.id);
+                                    }
+                                  }}
+                                  style={{
+                                    left: `${pos.x}px`,
+                                    top: `${pos.y}px`,
+                                    width: `${COL_W}px`,
+                                    height: `${ROW_H}px`,
+                                  }}
+                                  className={`absolute rounded-xl p-2.5 border flex flex-col justify-between cursor-pointer transition-all st-card ${
+                                    isSelected
+                                      ? "border-sky-500 ring-2 ring-sky-500/40 shadow-lg"
+                                      : isUpstream
+                                        ? "border-amber-500/70 bg-amber-500/5"
+                                        : isDownstream
+                                          ? "border-emerald-500/70 bg-emerald-500/5"
+                                          : "st-border hover:border-sky-500/50"
+                                  } ${isDimmed ? "opacity-35" : "opacity-100"}`}
+                                >
+                                  <div className="flex items-center justify-between gap-1.5">
+                                    <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono uppercase st-pill truncate">
+                                      {gn.group || `L${gn.layer ?? 0}`}
+                                    </span>
+                                    <span className="text-[10px] font-mono st-text-muted shrink-0">
+                                      ↑{gn.upstreamIds?.length || 0} · ↓
+                                      {gn.downstreamIds?.length || 0}
+                                    </span>
+                                  </div>
+                                  <div className="font-mono text-xs font-bold st-text-primary truncate">
+                                    {gn.label}
+                                  </div>
+                                  <div className="text-[10.5px] font-mono st-text-secondary truncate">
+                                    {gn.meta || gn.id}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (shape === "table" || (shape === "stream" && Array.isArray(projectedValue?.rows))) && projectedValue ? (
+                  (() => {
+                    const cols: TableColumn[] = projectedValue.columns || node.columns || [];
+                    const allRows: Record<string, unknown>[] = projectedValue.rows || [];
+                    const pk = projectedValue.primaryKey || node.primaryKey || cols[0]?.key || "id";
                     const q = (tableSearch[node.id] || "").trim().toLowerCase();
                     const filteredRows = q
                       ? allRows.filter((r) =>
@@ -1404,13 +2365,27 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 {filteredRows.map((row, rIdx) => {
                                   const rowKey = String(row[pk] ?? rIdx);
                                   const isChecked = selectedSet.has(rowKey);
+                                  const isSelectedMaster =
+                                    Boolean(selectContextKey) && activeMasterContextVal === rowKey;
                                   return (
                                     <tr
                                       key={rowKey}
-                                      className="hover:st-surface-muted transition-colors"
+                                      onClick={() => {
+                                        if (selectContextKey) handleMasterItemClick(rowKey);
+                                      }}
+                                      className={`transition-colors ${
+                                        selectContextKey ? "cursor-pointer" : ""
+                                      } ${
+                                        isSelectedMaster
+                                          ? "bg-sky-500/15 font-semibold"
+                                          : "hover:st-surface-muted"
+                                      }`}
                                     >
                                       {hasBulk && (
-                                        <td className="py-2 px-3">
+                                        <td
+                                          className="py-2 px-3"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
                                           <input
                                             type="checkbox"
                                             checked={isChecked}
@@ -1433,7 +2408,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                         </td>
                                       ))}
                                       {rowActions.length > 0 && (
-                                        <td className="py-2 px-3 text-right whitespace-nowrap">
+                                        <td
+                                          className="py-2 px-3 text-right whitespace-nowrap"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
                                           <div className="inline-flex items-center gap-1.5 justify-end">
                                             {rowActions.map((ra, aIdx) =>
                                               renderBoundTriggerButton(
@@ -1461,13 +2439,13 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                       </div>
                     );
                   })()
-                ) : shape === "matrix" && snap?.value ? (
+                ) : shape === "matrix" && projectedValue ? (
                   <div className="rounded-xl border st-border overflow-x-auto max-h-72 overflow-y-auto">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="border-b st-border st-subcard text-[11px] font-bold st-text-secondary">
                           <th className="py-2 px-3">Row \ Col</th>
-                          {(snap.value.colKeys || []).map((ck: string) => (
+                          {(projectedValue.colKeys || []).map((ck: string) => (
                             <th key={ck} className="py-2 px-3 text-center">
                               {ck}
                             </th>
@@ -1475,13 +2453,13 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y st-border">
-                        {(snap.value.rowKeys || []).map((rk: string) => (
+                        {(projectedValue.rowKeys || []).map((rk: string) => (
                           <tr key={rk} className="hover:st-surface-muted">
                             <td className="py-2 px-3 font-mono font-semibold st-text-primary">
                               {rk}
                             </td>
-                            {(snap.value.colKeys || []).map((ck: string) => {
-                              const cellVal = snap.value.cells?.[rk]?.[ck];
+                            {(projectedValue.colKeys || []).map((ck: string) => {
+                              const cellVal = projectedValue.cells?.[rk]?.[ck];
                               return (
                                 <td key={ck} className="py-2 px-3 text-center">
                                   {node.cellAction ? (
@@ -1570,6 +2548,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
           refreshTrigger={refreshTrigger}
           activeAudit={activeAudit}
           actionsMap={actionsMap}
+          dataSnapshots={snapshots}
           commandEnvOverrides={commandEnvOverrides}
           onClose={() => setActiveAudit(null)}
           onSkillUpdated={onSkillUpdated}
@@ -1588,6 +2567,7 @@ export interface BoundActionInspectorModalProps {
   refreshTrigger: number;
   activeAudit: ActiveBoundActionAudit;
   actionsMap: Map<string, { action: ActionItem; groupName: string }>;
+  dataSnapshots?: Record<string, DataSnapshot | undefined>;
   commandEnvOverrides?: Record<string, CommandEnvConfig>;
   onClose: () => void;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
@@ -1602,6 +2582,7 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
   refreshTrigger,
   activeAudit,
   actionsMap,
+  dataSnapshots = {},
   commandEnvOverrides,
   onClose,
   onSkillUpdated,
@@ -1794,9 +2775,14 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
               refreshTrigger={refreshTrigger}
               prefillValues={activeAudit.resolvedArgs}
               uiEnvOverride={commandEnvOverrides?.[`action:${targetAction.id}`]}
+              dataSnapshots={dataSnapshots}
               inAuditModal={true}
               onExecuted={onClose}
               onSkillUpdated={onSkillUpdated}
+              onTriggerFixAction={(fixId) => {
+                onClose();
+                onLocateActionInPlayground?.(fixId, {});
+              }}
               onExecute={async (p) => {
                 if (onExecute) {
                   await onExecute(p);

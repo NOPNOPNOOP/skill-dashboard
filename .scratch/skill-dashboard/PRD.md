@@ -148,6 +148,16 @@ Build **Skill Dashboard Studio** (`skill-dashboard`)—a fast, zero-external-dep
 78. As a user auditing how a `DataNode` produces its data and what actions it triggers, I want a **`🔍 Inspect`** button in every `DataNode` card header (next to `⚙️ Env` and `↻ Refresh`) that opens an inline **DataNode White-Box Inspector** with three views: (1) **`</> Execution Source`** showing the interpolated `resolvedSource` command/code/pattern/SQL alongside `📋 Copy` and **`▶ Test in Web Terminal`**, (2) **`⚡ Bound Actions (N)`** listing all `quickActions`/`rowActions`/`bulkActions`/`cellAction` with target action existence checks, `args` templates, and one-click `🔍 Audit Action`, and (3) **`📄 Raw Output & DAG`** showing the raw `stdout`/`stderr`, normalized `JSON` payload, `dependsOn`, and `invalidateOnActions`.
 79. As an AI Agent or developer using `skill-dashboard` itself as a canonical self-hosted reference (`skills/skill-dashboard/.dashboard/manifest.yaml`), I want `skill-dashboard`'s own `defaultWorkspace` (`"../.."`) and relative `defaultWorkspace` resolution (`expandHomePath(defaultWorkspace, homeDir, realPath)`) to resolve cleanly to the engine repository root (with automatic fallback to the running server's engine root if installed standalone), and I want all `DataNode`s and `ActionItem`s to support `{{manifest_cli}}` (`bun <engine_root>/src/manifest-cli.ts`) and `{{dashboard_root}}` (`<engine_root>`) so that `ecosystem-health`, `validate-manifests`, `manifest-cli-map`, `build-ui`, and `run-tests` execute with 0 errors and zero NPM `bunx` lookup failures.
 80. As a user or AI Agent inspecting `skill-dashboard`'s own Playground and `SKILL.md` authoring guide, I want `skill-dashboard`'s `.dashboard/modules/` to dogfood **`category`** filter pills (`"1. Service & Runtime"`, `"2. Skills & Ecosystem"`) and an explicit **`intermediate: true`** upstream DAG source node (`skills-catalog-raw` feeding `skills-catalog-table` and `studio-coverage-kpi`), and I want `SKILL.md`, `references/01..04-*.md`, and `buildAgentManifestSyncPrompt` (which resolves `skills/skill-dashboard/SKILL.md` accurately) to explicitly codify the 8 Core Authoring Rules (including `intermediate: true` DAG fan-out, clean `rowActions` raw field bindings, and two-tier `cwd`/`python`/`envFile`/`env` execution environments).
+81. As a skill author or developer working with arbitrary JSON or hierarchical data, I want the **Data Model Layer** (5 orthogonal primitives preserved losslessly in `DataSnapshot.rawParsed`: `Scalar`, `Document/Tree`, `Records`, `Graph`, `Raw`) to be cleanly decoupled from the **UI Presentation Layer (`shape`)**:
+    - When `shape: "kv"` is used on a JSON object containing nested objects or arrays, `KvEntry.rawValue` preserves the nested structure so the `kv` card renders an inline expandable JSON sub-tree instead of truncating a `JSON.stringify` string;
+    - When `shape: "tree"` (or `shape: "auto"` on a nested JSON object) is used, the engine recursively normalizes arbitrary nested JSON objects/arrays or explicit `{ id, label, value, meta, tone, children }[]` trees into `TreePayload` (`{ roots: TreeNodeItem[] }`), rendered as an interactive collapsible tree with `Expand All / Collapse All`, path badges, search filtering, and `nodeActions`;
+    - Every structured `DataNode` card header provides a lightweight **View Switcher** (`KV ⇄ Tree` for documents; `Table ⇄ Matrix ⇄ List ⇄ Tree` for records; `Graph ⇄ Table ⇄ Tree` for graphs) that switches visual projection in-place on the frontend without mutating backend `ctx.data` or `fromData` contracts.
+82. As a skill author modeling pipelines, dependency networks, or service topologies, I want first-class **`shape: "graph"`** (`{ nodes: GraphNodeItem[], edges: GraphEdgeItem[] }`) where the engine automatically computes deterministic topological layers (`layer` via Kahn's algorithm) and transitive **`upstreamIds`** (ancestors) and **`downstreamIds`** (descendants / impact radius) for every node, and renders a deterministic-coordinate SVG + card **Layered Directed Graph (`InteractiveGraphWidget`)** that highlights upstream/downstream paths on node selection and binds `{{node.id}}`, `{{node.label}}`, `{{node.value}}`, `{{node.upstreamIds}}`, and `{{node.downstreamIds}}` into `nodeActions` (or per-node `actionId` triggers).
+83. As a developer orchestrating multi-node data flows in the Playground, I want four reactive data-layer mechanisms to work end-to-end and be dogfooded in `skill-dashboard`'s own `.dashboard/`:
+    - **Multi-Source Data Join**: Downstream `runtime: ts` nodes joining `skills-catalog-raw` (filesystem scan) with `skills-run-stats-raw` (`runtime: sqlite` aggregation on `dashboard.db`);
+    - **Master-Detail Click Drill-Down (`selectContextKey`)**: Clicking a row in `table`, a pill in `list`, a node in `tree`, or a node in `graph` updates `context[selectContextKey]` (e.g. `focus_skill`) and cascades to filter downstream tables, trees, and graphs (clicking again resets to `"all"`);
+    - **Action Data Precondition Guards (`preconditions:`)**: `ActionItem.preconditions` evaluates live `DataSnapshot` state (`equals`, `contains`, `minRows`) in `ActionCard` and `BoundActionInspectorModal`, surfacing a warning banner and one-click `fixActionId` button when unmet;
+    - **Protected `passive` Node `intoData` Feedback Loop**: `ReactiveGraphEngine.invalidateSkill` preserves `runtime: "passive"` snapshots across global refreshes so `ActionItem.output.intoData` (e.g. `manifest-cli-map` writing into `last-symbol-map-output`) remains visible in the UI after PTY completion.
 
 ---
 
@@ -311,7 +321,7 @@ export interface DataNode {
     prelude?: boolean;     // default false; when true, pre-injects { fs, path, os, Database, YAML, $ }
     code: string;
   };
-  shape: "scalar" | "kv" | "list" | "table" | "matrix" | "stream" | "raw";
+  shape: "scalar" | "kv" | "list" | "table" | "matrix" | "tree" | "graph" | "stream" | "raw" | "auto";
   primaryKey?: string;
   valueColumn?: string;
   labelColumn?: string;
@@ -322,10 +332,12 @@ export interface DataNode {
     type: "text" | "code" | "badge" | "bytes" | "datetime" | "progress" | "boolean" | "number";
   }>;
   pivot?: { rowKey: string; colKey: string; valueKey: string };
+  selectContextKey?: string;          // declarative master-detail context key updated on row/pill/tree/graph-node click
   quickActions?: BoundActionTrigger[];
   rowActions?: BoundActionTrigger[];
   bulkActions?: BoundActionTrigger[];
   cellAction?: BoundActionTrigger;
+  nodeActions?: BoundActionTrigger[]; // bound triggers for tree/graph nodes ({{node.id}}, {{node.upstreamIds}}, {{node.downstreamIds}})
   sync?: {
     onMount?: boolean;
     ttlMs?: number;
@@ -335,6 +347,18 @@ export interface DataNode {
     pollMs?: number;
     stream?: boolean;
   };
+}
+
+export interface ActionPrecondition {
+  dataNodeId: string;
+  field?: string;
+  equals?: string | number | boolean;
+  notEquals?: string | number | boolean;
+  notEmpty?: boolean;
+  minRows?: number;
+  contains?: string;
+  message: string;
+  fixActionId?: string;
 }
 
 export interface ActionItem {
@@ -353,6 +377,7 @@ export interface ActionItem {
   command: string;                    // template supporting {{python}}, {{skill_dir}}, {{project_root}}, {{data_dir}}, {{cache_dir}}, {{artifacts_dir}}, {{context.*}}, {{data.*}}, {{form.*}}
   script?: string;                    // multi-line isolated script (`#!/bin/zsh\nset -e`)
   form?: FormField[];
+  preconditions?: ActionPrecondition[]; // declarative data-state guards evaluated against live DataSnapshots
   artifacts?: Array<string | ArtifactRule>; // structured 3-channel artifact extraction rules
   output?: {
     intoData?: string;                // pipes parsed action output back into a DataNode
@@ -536,6 +561,11 @@ export interface AgentManifestSyncRequest {
    - Verifies that `buildAgentManifestSyncPrompt` resolves `skillGuidePath` to an existing `skills/skill-dashboard/SKILL.md` file and includes guidance on `intermediate: true`, `category`, per-command `cwd`/`python`/`envFile`/`env`, and clean `rowActions` bindings.
    - Verifies that `expandHomePath` resolves relative `defaultWorkspace` (such as `"../.."`) against the skill's `realPath` (falling back to the engine root when needed), and that `{{manifest_cli}}` and `{{dashboard_root}}` interpolate cleanly in both `ActionItem`s and `DataNode`s.
    - Verifies that `skill-dashboard`'s own `.dashboard/manifest.yaml` and modules pass `manifest-cli validate skill-dashboard`, evaluate all `DataNode`s (including `ecosystem-health` and `skills-catalog-raw` with `intermediate: true` and `category` tags) with `status === "ready"`, and resolve all `build-ui`/`run-tests`/`install-launchd` actions to the repository root containing `package.json`.
+14. **5-Primitive Data Model & View Decoupling (`kv` Nested JSON, `tree`, `graph` Kahn Layering & Impact Radius, `list`, `matrix`), Master-Detail `selectContextKey`, Action `preconditions`, and Protected `passive` `intoData` Loop**:
+   - Verifies that `shape: "kv"` preserves `rawValue` on nested JSON objects/arrays and that `resolveDataSnapshotPath` (`{{data.<nodeId>.<deep.path>}}`) resolves arbitrary nested JSON paths from `rawParsed`.
+   - Verifies that `shape: "tree"` recursively converts arbitrary nested JSON objects/arrays and explicit tree nodes into `TreePayload` (`{ roots: TreeNodeItem[] }`).
+   - Verifies that `shape: "graph"` computes topological `layer`, `upstreamIds`, and `downstreamIds` for every node, projects nodes into `FormFieldOption[]`, and interpolates `{{node.id}}`, `{{node.upstreamIds}}`, and `{{node.downstreamIds}}` via `interpolateBoundTriggerArgs`.
+   - Verifies that `ReactiveGraphEngine.invalidateSkill` preserves `runtime: "passive"` snapshots populated by `ActionItem.output.intoData` across global refreshes, and that `skill-dashboard`'s own `.dashboard/` dogfoods all canonical shapes (`scalar`, `kv`, `tree`, `table`, `matrix`, `list`, `graph`, `raw`/`passive`), multi-source SQLite + filesystem Join, `selectContextKey` master-detail filtering, and `ActionItem.preconditions`.
 
 ---
 

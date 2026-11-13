@@ -2,7 +2,7 @@
 data:
   - id: skills-catalog-raw
     title: "Local Skills Hub Raw Scanner (Intermediate DAG Source)"
-    description: "Upstream intermediate node scanning `~/.agents/skills` once for downstream table & KPI nodes (`intermediate: true` · `runtime: ts` · `prelude: true`)"
+    description: "Upstream intermediate node scanning `~/.agents/skills` & agent mount directories once for downstream table, matrix, tree, graph & KPI nodes (`intermediate: true` · `runtime: ts` · `prelude: true`)"
     category: "2. Skills & Ecosystem"
     intermediate: true
     runtime: ts
@@ -11,29 +11,68 @@ data:
     sync:
       onMount: true
     code: |
-      const hubDir = path.join(os.homedir(), ".agents/skills");
+      const home = os.homedir();
+      const hubDir = path.join(home, ".agents/skills");
+      const claudeDir = path.join(home, ".claude/skills");
+      const openclawDir = path.join(home, ".openclaw/skills");
       const items: any[] = [];
-      if (fs.existsSync(hubDir)) {
-        for (const entry of fs.readdirSync(hubDir).sort()) {
+      const scanDir = fs.existsSync(hubDir) ? hubDir : path.dirname(ctx.skillDir);
+      if (fs.existsSync(scanDir)) {
+        for (const entry of fs.readdirSync(scanDir).sort()) {
           if (entry.startsWith(".")) continue;
-          const full = path.join(hubDir, entry);
+          const full = path.join(scanDir, entry);
           try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
           const hasManifest = fs.existsSync(path.join(full, ".dashboard/manifest.yaml"));
-          const hasScripts = fs.existsSync(path.join(full, "scripts")) || fs.existsSync(path.join(full, "tools"));
+          const hasScripts = fs.existsSync(path.join(full, "scripts")) || fs.existsSync(path.join(full, "tools")) || fs.existsSync(path.join(full, "src"));
+          const inClaude = fs.existsSync(path.join(claudeDir, entry));
+          const inOpenClaw = fs.existsSync(path.join(openclawDir, entry));
           items.push({
             id: entry,
+            path: full,
             status: hasManifest ? "studio-ready" : hasScripts ? "scripted" : "zero-config",
             hasManifest,
             hasScripts,
             location: "~/.agents/skills",
+            mounts: {
+              "Claude Code": inClaude ? "✅ Symlinked" : "—",
+              "Codex / OpenCode / Pi": "✅ Auto-Hub",
+              "OpenClaw": inOpenClaw ? "✅ Symlinked" : "—",
+            },
           });
         }
       }
+      if (!items.some((x) => x.id === "skill-dashboard")) {
+        items.unshift({
+          id: "skill-dashboard",
+          path: ctx.skillDir,
+          status: "studio-ready",
+          hasManifest: true,
+          hasScripts: true,
+          location: "~/.agents/skills",
+          mounts: {
+            "Claude Code": "✅ Symlinked",
+            "Codex / OpenCode / Pi": "✅ Auto-Hub",
+            "OpenClaw": "—",
+          },
+        });
+      }
       return items;
+
+  - id: skills-run-stats-raw
+    title: "SQLite Per-Skill Execution Aggregator (Intermediate DAG Source)"
+    description: "Upstream SQLite aggregation joined into `skills-catalog-table` (`intermediate: true` · `runtime: sqlite`)"
+    category: "2. Skills & Ecosystem"
+    intermediate: true
+    runtime: sqlite
+    db: "~/.local/share/skill-dashboard/dashboard.db"
+    sql: "SELECT skill_id AS skillId, COUNT(*) AS totalRuns FROM runs GROUP BY skill_id"
+    shape: raw
+    sync:
+      onMount: true
 
   - id: skills-catalog-table
     title: "Local Skills Studio Audit ({{context.skill_scope}})"
-    description: "Reactive table derived from `skills-catalog-raw` filtered by `context.skill_scope` (`runtime: ts` · `prelude: true` · `shape: table` · `rowActions` · `fromData` source)"
+    description: "Multi-Source Join (`skills-catalog-raw` ⋈ `skills-run-stats-raw`) with Master-Detail click drill-down (`selectContextKey: focus_skill` · `rowActions` · `fromData`)"
     category: "2. Skills & Ecosystem"
     runtime: ts
     prelude: true
@@ -42,10 +81,12 @@ data:
     valueColumn: "id"
     labelColumn: "id"
     metaColumn: "status"
+    selectContextKey: "focus_skill"
     sync:
       onMount: true
       dependsOn:
         - "skills-catalog-raw"
+        - "skills-run-stats-raw"
         - "context.skill_scope"
     columns:
       - key: "id"
@@ -57,6 +98,9 @@ data:
       - key: "hasScripts"
         label: "Scripts/Tools"
         type: "boolean"
+      - key: "totalRuns"
+        label: "Total Runs"
+        type: "number"
       - key: "location"
         label: "Hub"
         type: "text"
@@ -73,6 +117,8 @@ data:
           skill_id: "{{row.id}}"
     code: |
       const allItems: any[] = Array.isArray(ctx.data["skills-catalog-raw"]) ? ctx.data["skills-catalog-raw"] : [];
+      const runRows: any[] = Array.isArray(ctx.data["skills-run-stats-raw"]) ? ctx.data["skills-run-stats-raw"] : [];
+      const runMap = new Map(runRows.map((r: any) => [String(r.skillId), Number(r.totalRuns || 0)]));
       const scope = String(ctx.context.skill_scope || "studio");
       return allItems
         .filter((item) => {
@@ -84,8 +130,199 @@ data:
           id,
           status,
           hasScripts,
+          totalRuns: runMap.get(id) || 0,
           location,
         }));
+
+  - id: ecosystem-mount-matrix
+    title: "Multi-Agent Ecosystem Mount Matrix (`shape: matrix`)"
+    description: "2D pivot projection of skills × agent ecosystems (`Claude Code`, `Codex/OpenCode/Pi`, `OpenClaw`) with clickable `cellAction` (`shape: matrix`)"
+    category: "2. Skills & Ecosystem"
+    runtime: ts
+    prelude: true
+    shape: matrix
+    pivot:
+      rowKey: "skill"
+      colKey: "agent"
+      valueKey: "state"
+    cellAction:
+      label: "Inspect Skill Symbol Map"
+      actionId: manifest-cli-map
+      mode: run
+      args:
+        skill_id: "{{cell.rowKey}}"
+    sync:
+      onMount: true
+      dependsOn:
+        - "skills-catalog-raw"
+        - "context.skill_scope"
+        - "context.focus_skill"
+    code: |
+      const allItems: any[] = Array.isArray(ctx.data["skills-catalog-raw"]) ? ctx.data["skills-catalog-raw"] : [];
+      const scope = String(ctx.context.skill_scope || "studio");
+      const focus = String(ctx.context.focus_skill || "all");
+      const filtered = allItems
+        .filter((item) => {
+          if (focus && focus !== "all") return item.id === focus;
+          if (scope === "studio" && !item.hasManifest) return false;
+          if (scope === "scripts" && !item.hasScripts) return false;
+          return true;
+        })
+        .slice(0, 12);
+      const records: Array<{ skill: string; agent: string; state: string }> = [];
+      for (const item of filtered) {
+        const mounts = item.mounts || {};
+        for (const [agent, state] of Object.entries(mounts)) {
+          records.push({ skill: item.id, agent, state: String(state) });
+        }
+      }
+      return records;
+
+  - id: focused-manifest-ast-raw
+    title: "Focused Skill Manifest AST Loader (Intermediate DAG Source)"
+    description: "Upstream intermediate node parsing `.dashboard/manifest.yaml` & modules once for `skill-reactive-graph` and `manifest-symbol-tree` (`intermediate: true` · `runtime: ts` · `prelude: true`)"
+    category: "2. Skills & Ecosystem"
+    intermediate: true
+    runtime: ts
+    prelude: true
+    shape: raw
+    sync:
+      onMount: true
+      dependsOn:
+        - "skills-catalog-raw"
+        - "context.focus_skill"
+    code: |
+      const allItems: any[] = Array.isArray(ctx.data["skills-catalog-raw"]) ? ctx.data["skills-catalog-raw"] : [];
+      const focus = String(ctx.context.focus_skill || "all");
+      const targetItem =
+        allItems.find((x) => x.id === focus && x.hasManifest) ||
+        allItems.find((x) => x.id === "skill-dashboard") ||
+        { id: "skill-dashboard", path: ctx.skillDir };
+      const dashDir = path.join(targetItem.path || ctx.skillDir, ".dashboard");
+      const rootPath = path.join(dashDir, "manifest.yaml");
+      const modules: Array<{ rel: string; doc: any }> = [];
+      if (fs.existsSync(rootPath)) {
+        const rootDoc: any = YAML.parse(fs.readFileSync(rootPath, "utf-8")) || {};
+        const modFiles = ["manifest.yaml", ...((rootDoc.includes || []).map((p: string) => p.replace(/^\.\//, "")))];
+        for (const rel of modFiles) {
+          const fp = path.join(dashDir, rel);
+          if (!fs.existsSync(fp)) continue;
+          modules.push({ rel, doc: YAML.parse(fs.readFileSync(fp, "utf-8")) || {} });
+        }
+      }
+      return { targetSkillId: targetItem.id, modules };
+
+  - id: skill-reactive-graph
+    title: "Reactive DAG Lineage & Blast Radius (`shape: graph` · focus: {{context.focus_skill}})"
+    description: "Directed topology graph (`context` → `intermediate` → `data` → `action`) with Kahn topological layering, upstream/downstream blast radius, and `nodeActions` (`shape: graph`)"
+    category: "2. Skills & Ecosystem"
+    runtime: ts
+    prelude: true
+    shape: graph
+    nodeActions:
+      - label: "Symbol Map"
+        actionId: manifest-cli-map
+        mode: run
+        args:
+          skill_id: "{{node.value}}"
+    sync:
+      onMount: true
+      dependsOn:
+        - "focused-manifest-ast-raw"
+    code: |
+      const ast: any = ctx.data["focused-manifest-ast-raw"] || { targetSkillId: "skill-dashboard", modules: [] };
+      const targetId = String(ast.targetSkillId || "skill-dashboard");
+      const nodes: any[] = [];
+      const edges: any[] = [];
+      for (const { doc } of ast.modules || []) {
+        for (const c of doc.context || []) {
+          nodes.push({ id: `context.${c.key}`, label: `ctx:${c.key}`, value: targetId, group: "Context", meta: c.type || "select" });
+        }
+        for (const d of doc.data || []) {
+          nodes.push({
+            id: d.id,
+            label: d.id,
+            value: targetId,
+            group: d.intermediate ? "Intermediate" : `Data (${d.shape || "raw"})`,
+            meta: `${d.runtime || "zsh"} · ${d.shape || "raw"}`,
+          });
+          for (const dep of d.sync?.dependsOn || []) {
+            edges.push({ source: dep, target: d.id, label: "dependsOn" });
+          }
+          if (d.selectContextKey) {
+            edges.push({ source: d.id, target: `context.${d.selectContextKey}`, label: "selects" });
+          }
+        }
+        for (const g of doc.actionGroups || []) {
+          for (const a of g.actions || []) {
+            if (a.output?.intoData) {
+              nodes.push({ id: `action:${a.id}`, label: `act:${a.id}`, value: targetId, group: "Action", meta: a.danger || "safe" });
+              edges.push({ source: `action:${a.id}`, target: a.output.intoData, label: "intoData" });
+            }
+          }
+        }
+      }
+      return { nodes, edges };
+
+  - id: manifest-symbol-tree
+    title: "Modular `.dashboard/` Symbol Explorer (`shape: tree` · focus: {{context.focus_skill}})"
+    description: "Hierarchical tree explorer of `.dashboard/manifest.yaml` and included vertical modules (`shape: tree` · `Expand All / Collapse All` · View Switcher)"
+    category: "2. Skills & Ecosystem"
+    runtime: ts
+    prelude: true
+    shape: tree
+    nodeActions:
+      - label: "Run Map CLI"
+        actionId: manifest-cli-map
+        mode: run
+        args:
+          skill_id: "{{node.value}}"
+    sync:
+      onMount: true
+      dependsOn:
+        - "focused-manifest-ast-raw"
+    code: |
+      const ast: any = ctx.data["focused-manifest-ast-raw"] || { targetSkillId: "skill-dashboard", modules: [] };
+      const targetId = String(ast.targetSkillId || "skill-dashboard");
+      const roots: any[] = [];
+      for (const { rel, doc } of ast.modules || []) {
+        const children: any[] = [];
+        for (const c of doc.context || []) {
+          children.push({ id: `${rel}:context:${c.key}`, label: `context.${c.key}`, value: targetId, meta: c.type });
+        }
+        for (const d of doc.data || []) {
+          children.push({ id: `${rel}:data:${d.id}`, label: `data.${d.id}`, value: targetId, meta: `${d.runtime || "zsh"} · ${d.shape || "raw"}` });
+        }
+        for (const g of doc.actionGroups || []) {
+          for (const a of g.actions || []) {
+            children.push({ id: `${rel}:action:${a.id}`, label: `action.${a.id}`, value: targetId, meta: a.subgroup || g.name });
+          }
+        }
+        for (const v of doc.views || []) {
+          children.push({ id: `${rel}:view:${v.id}`, label: `view.${v.id}`, value: targetId, meta: v.source });
+        }
+        roots.push({
+          id: rel,
+          label: `${targetId}/.dashboard/${rel}`,
+          value: targetId,
+          meta: `${children.length} symbols`,
+          children,
+        });
+      }
+      return roots;
+
+  - id: last-symbol-map-output
+    title: "Last Symbol Map Output (`runtime: passive` · `output.intoData`)"
+    description: "Passive data node populated automatically when `manifest-cli-map` runs in the Web Terminal, preserved across global refreshes (`runtime: passive` · `shape: raw`)"
+    category: "2. Skills & Ecosystem"
+    runtime: passive
+    shape: raw
+    quickActions:
+      - label: "▶ Generate Symbol Map (skill-dashboard)"
+        actionId: manifest-cli-map
+        mode: run
+        args:
+          skill_id: "skill-dashboard"
 
   - id: studio-coverage-kpi
     title: "Filtered Skills in Scope ({{context.skill_scope}})"
@@ -116,21 +353,29 @@ actionGroups:
       - id: manifest-cli-map
         title: "Print Cross-File Symbol Map & Reference Graph (`manifest-cli map`)"
         subgroup: "2.1 Manifest Authoring CLI"
-        description: "Output the full symbol index, defining module files, and bidirectional dependency/consumer graph for a skill."
+        description: "Output the full symbol index, defining module files, and bidirectional dependency/consumer graph for a skill, and pipe into `last-symbol-map-output` (`output.intoData`)."
         danger: safe
         defaultRunner: web_terminal
         cwd: project_root
         command: "{{manifest_cli}} map {{form.skill_id}}"
+        output:
+          intoData: "last-symbol-map-output"
+          shape: raw
         form:
           - $ref: "#/defs/targetSkillField"
 
       - id: sync-target-skill
         title: "Inspect / Print Agent Sync Prompt for Skill"
         subgroup: "2.1 Manifest Authoring CLI"
-        description: "Demonstrates `fromData: skills-catalog-table` dropdown binding via `$ref: '#/defs/targetSkillField'`."
+        description: "Demonstrates `fromData: skills-catalog-table` dropdown binding via `$ref: '#/defs/targetSkillField'` and declarative `preconditions` guard."
         danger: safe
         defaultRunner: web_terminal
         cwd: project_root
+        preconditions:
+          - dataNodeId: "skills-catalog-table"
+            minRows: 1
+            message: "At least 1 skill must be present in skills-catalog-table for the selected scope"
+            fixActionId: "validate-manifests"
         script: |
           TARGET="{{form.skill_id}}"
           echo "=== Skill: $TARGET (Scope: {{context.skill_scope}}) ==="

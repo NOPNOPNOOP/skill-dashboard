@@ -106,6 +106,9 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
     for (const f of act.form || []) {
       if (f.fromData) deps.add(`data:${f.fromData}`);
     }
+    for (const pre of act.preconditions || []) {
+      if (pre.dataNodeId) deps.add(`data:${pre.dataNodeId}`);
+    }
     symbols[`action:${act.id}`] = {
       kind: "action",
       id: act.id,
@@ -151,18 +154,25 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
     };
   }
 
-  // Wire bidirectional usedBy edges (including rowActions/quickActions/bulkActions/cellAction & output.intoData)
+  // Wire bidirectional usedBy edges (including rowActions/quickActions/bulkActions/cellAction/nodeActions, selectContextKey & output.intoData)
   for (const node of skill.manifest.data || []) {
     const triggers = [
       ...(node.quickActions || []),
       ...(node.rowActions || []),
       ...(node.bulkActions || []),
       ...(node.cellAction ? [node.cellAction] : []),
+      ...(node.nodeActions || []),
     ];
     for (const tr of triggers) {
       const actEntry = symbols[`action:${tr.actionId}`];
       if (actEntry && !actEntry.usedBy.includes(`data:${node.id} (trigger)`)) {
         actEntry.usedBy.push(`data:${node.id} (trigger)`);
+      }
+    }
+    if (node.selectContextKey) {
+      const ctxEntry = symbols[`context:${node.selectContextKey}`];
+      if (ctxEntry && !ctxEntry.usedBy.includes(`data:${node.id} (selectContextKey)`)) {
+        ctxEntry.usedBy.push(`data:${node.id} (selectContextKey)`);
       }
     }
   }
@@ -264,6 +274,7 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
       ...(node.rowActions || []),
       ...(node.bulkActions || []),
       ...(node.cellAction ? [node.cellAction] : []),
+      ...(node.nodeActions || []),
     ];
     for (const tr of triggers) {
       if (!actionIds.has(tr.actionId)) {
@@ -276,6 +287,16 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
           fixHint: `Available action IDs: ${[...actionIds].slice(0, 8).join(", ")}`,
         });
       }
+    }
+    if (node.selectContextKey && !contextKeys.has(node.selectContextKey)) {
+      issues.push({
+        level: "L2-Graph",
+        severity: "error",
+        file,
+        symbolId: `data:${node.id}`,
+        message: `Data node "${node.id}" declares selectContextKey "${node.selectContextKey}", which does not exist in context.`,
+        fixHint: `Available context keys: ${[...contextKeys].join(", ")}`,
+      });
     }
   }
 
@@ -311,6 +332,26 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
         symbolId: `action:${act.id}`,
         message: `Action "${act.id}" pipes output.intoData to non-existent data node "${act.output.intoData}".`,
       });
+    }
+    for (const pre of act.preconditions || []) {
+      if (!dataIds.has(pre.dataNodeId)) {
+        issues.push({
+          level: "L2-Graph",
+          severity: "error",
+          file,
+          symbolId: `action:${act.id}`,
+          message: `Action "${act.id}" precondition references non-existent dataNodeId "${pre.dataNodeId}".`,
+        });
+      }
+      if (pre.fixActionId && !actionIds.has(pre.fixActionId)) {
+        issues.push({
+          level: "L2-Graph",
+          severity: "error",
+          file,
+          symbolId: `action:${act.id}`,
+          message: `Action "${act.id}" precondition references non-existent fixActionId "${pre.fixActionId}".`,
+        });
+      }
     }
     const imp = extractImplicitDependencies(act.script || act.command || "");
     for (const ck of imp.contextKeys) {

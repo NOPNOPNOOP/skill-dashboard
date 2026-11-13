@@ -43,6 +43,11 @@ context:
         value: "scripts"
       - label: "All Installed Skills"
         value: "all"
+  - key: focus_skill
+    label: "Focused Skill (Master-Detail)"
+    type: text
+    default: "all"
+    description: "Click any skill row in skills-catalog-table to filter downstream tree/graph/matrix nodes (or 'all')"
 
 tags:
   - dashboard

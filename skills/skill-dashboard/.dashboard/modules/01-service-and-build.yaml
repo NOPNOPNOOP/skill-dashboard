@@ -41,9 +41,34 @@ data:
         "macOS LaunchAgent": plistExists ? "INSTALLED (Auto Keep-Alive)" : "MANUAL MODE",
         "SQLite Index (dashboard.db)": dbSizeKb,
         "XDG Config (config.yaml)": fs.existsSync(configPath) ? "READY" : "DEFAULT",
-        "XDG Cache Dir": cachePath,
-        "Active Scope Filter": String(ctx.context.skill_scope || "studio"),
+        "Active Scope Filter": `${ctx.context.skill_scope || "studio"} (focus: ${ctx.context.focus_skill || "all"})`,
+        "Storage Paths": {
+          db: dbPath,
+          config: configPath,
+          cache: cachePath,
+          plist: plistPath,
+        },
+        "Runtime Info": {
+          bunVersion: Bun.version,
+          platform: process.platform,
+          arch: process.arch,
+        },
       };
+
+  - id: architecture-issues-list
+    title: "Architecture Specs & Reference Manuals (`shape: list`)"
+    description: "High-density pill stream scanning `.scratch/skill-dashboard/issues/*.md` and `references/*.md` (`runtime: glob` · `shape: list` · View Switcher)"
+    category: "1. Service & Runtime"
+    runtime: glob
+    cwd: project_root
+    pattern:
+      - "{{dashboard_root}}/.scratch/skill-dashboard/issues/*.md"
+      - "{{skill_dir}}/references/*.md"
+    valueFormat: basename
+    shape: list
+    valueColumn: "name"
+    labelColumn: "name"
+    metaColumn: "sizeFormatted"
 
   - id: recent-runs-table
     title: "Recent Execution Runs (SQLite `dashboard.db`)"

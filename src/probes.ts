@@ -16,15 +16,26 @@ import * as pathModule from "path";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import YAML from "yaml";
 import {
+  buildTreeFromArbitraryData,
+  collectTreeLeafOptions,
+  computeGraphTopology,
   extractImplicitDependencies,
   getDashboardEngineRoot,
   getManifestCliPath,
+  inferAutoDataShape,
   resolveCommandEnvironment,
   resolveDataSnapshotPath,
   resolvePythonExecutable,
   shellEscape,
   type ResolvedCommandEnvironment,
 } from "./interpolator.ts";
+
+export {
+  buildTreeFromArbitraryData,
+  collectTreeLeafOptions,
+  computeGraphTopology,
+  inferAutoDataShape,
+};
 import {
   ensureUnitSandboxPaths,
   resolveDashboardPaths,
@@ -379,8 +390,9 @@ export function normalizeToShapeAndOptions(params: {
   exitCode: number;
   shape: DataShape;
   node?: Partial<DataNode>;
-}): { value: any; options: FormFieldOption[] } {
-  const { data, rawStdout, rawStderr, exitCode, shape, node } = params;
+}): { value: any; options: FormFieldOption[]; resolvedShape: DataShape } {
+  const { data, rawStdout, rawStderr, exitCode, shape: rawShape, node } = params;
+  const shape: DataShape = rawShape === "auto" ? inferAutoDataShape(data) : rawShape;
   const valCol = node?.valueColumn || node?.primaryKey || "value";
   const lblCol = node?.labelColumn || "label";
   const metaCol = node?.metaColumn;
@@ -394,6 +406,7 @@ export function normalizeToShapeAndOptions(params: {
     return {
       value: { stdout: text, stderr: rawStderr, exitCode },
       options: lines.map((l) => ({ label: l, value: l })),
+      resolvedShape: "raw",
     };
   }
 
@@ -413,6 +426,7 @@ export function normalizeToShapeAndOptions(params: {
         options: data
           .map((r: any) => (r && r[pk] != null ? { label: String(r[pk]), value: String(r[pk]) } : null))
           .filter(Boolean) as FormFieldOption[],
+        resolvedShape: "stream",
       };
     }
     const text = typeof data === "string" ? data : rawStdout || JSON.stringify(data, null, 2);
@@ -423,6 +437,7 @@ export function normalizeToShapeAndOptions(params: {
     return {
       value: { stdout: text, stderr: rawStderr, exitCode },
       options: lines.map((l) => ({ label: l, value: l })),
+      resolvedShape: "stream",
     };
   }
 
@@ -437,6 +452,7 @@ export function normalizeToShapeAndOptions(params: {
           tone: data.tone || "neutral",
         },
         options: sv ? [{ label: sv, value: sv }] : [],
+        resolvedShape: "scalar",
       };
     }
     const prim =
@@ -446,6 +462,7 @@ export function normalizeToShapeAndOptions(params: {
     return {
       value: { value: prim, label: node?.title, tone: "neutral" },
       options: String(prim) ? [{ label: String(prim), value: String(prim) }] : [],
+      resolvedShape: "scalar",
     };
   }
 
@@ -461,23 +478,61 @@ export function normalizeToShapeAndOptions(params: {
             : data
         : { output: String(data ?? rawStdout).trim() };
     const entries = hasCustomEntries
-      ? data.entries.map((e: any) => ({
-          key: String(e.key ?? ""),
-          label: String(e.label ?? e.key ?? ""),
-          value:
-            typeof e.value === "object" && e.value !== null
-              ? JSON.stringify(e.value)
-              : (e.value as string | number | boolean),
-          tone: e.tone,
-        }))
-      : Object.entries(rec).map(([k, v]) => ({
-          key: k,
-          label: k,
-          value: typeof v === "object" ? JSON.stringify(v) : (v as string | number | boolean),
-        }));
+      ? data.entries.map((e: any) => {
+          const isComplex = typeof e.value === "object" && e.value !== null;
+          return {
+            key: String(e.key ?? ""),
+            label: String(e.label ?? e.key ?? ""),
+            value: isComplex ? JSON.stringify(e.value) : (e.value as string | number | boolean),
+            rawValue: isComplex ? e.value : e.rawValue,
+            tone: e.tone,
+          };
+        })
+      : Object.entries(rec).map(([k, v]) => {
+          const isComplex = typeof v === "object" && v !== null;
+          return {
+            key: k,
+            label: k,
+            value: isComplex ? JSON.stringify(v) : (v as string | number | boolean),
+            rawValue: isComplex ? v : undefined,
+          };
+        });
     return {
       value: { entries, record: rec },
-      options: entries.map((e: any) => ({ label: `${e.label || e.key}: ${e.value}`, value: String(e.value) })),
+      options: entries.map((e: any) => ({
+        label: `${e.label || e.key}: ${e.value}`,
+        value: String(e.value),
+      })),
+      resolvedShape: "kv",
+    };
+  }
+
+  if (shape === "tree") {
+    const roots = buildTreeFromArbitraryData(data);
+    const options = collectTreeLeafOptions(roots);
+    return {
+      value: { roots },
+      options,
+      resolvedShape: "tree",
+    };
+  }
+
+  if (shape === "graph") {
+    const rawNodes = Array.isArray(data?.nodes)
+      ? data.nodes
+      : Array.isArray(data)
+        ? data
+        : [];
+    const rawEdges = Array.isArray(data?.edges) ? data.edges : [];
+    const topo = computeGraphTopology(rawNodes, rawEdges);
+    return {
+      value: topo,
+      options: topo.nodes.map((n) => ({
+        value: n.value || n.id,
+        label: n.meta && !n.label.includes(n.meta) ? `${n.label} (${n.meta})` : n.label,
+        meta: n.meta,
+      })),
+      resolvedShape: "graph",
     };
   }
 
@@ -506,12 +561,19 @@ export function normalizeToShapeAndOptions(params: {
         label: it.meta ? `${it.label} (${it.meta})` : it.label,
         meta: it.meta,
       })),
+      resolvedShape: "list",
     };
   }
 
   if (shape === "matrix") {
     if (data && typeof data === "object" && "rowKeys" in data && "colKeys" in data && "cells" in data) {
-      return { value: data, options: [] };
+      return {
+        value: data,
+        options: Array.isArray(data.rowKeys)
+          ? data.rowKeys.map((rk: string) => ({ label: String(rk), value: String(rk) }))
+          : [],
+        resolvedShape: "matrix",
+      };
     }
     const rows: Record<string, any>[] = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
     const rKey = node?.pivot?.rowKey || "row";
@@ -532,10 +594,11 @@ export function normalizeToShapeAndOptions(params: {
     return {
       value: { rowKeys: [...rowSet], colKeys: [...colSet], cells },
       options: [...rowSet].map((rk) => ({ label: rk, value: rk })),
+      resolvedShape: "matrix",
     };
   }
 
-  // Default to "table" (or "tree")
+  // Default to "table"
   let rows: Record<string, unknown>[] = [];
   if (Array.isArray(data)) {
     rows = data.map((item) =>
@@ -574,6 +637,7 @@ export function normalizeToShapeAndOptions(params: {
       primaryKey: node?.primaryKey || firstColKey,
     },
     options,
+    resolvedShape: "table",
   };
 }
 
@@ -650,8 +714,18 @@ export class ReactiveGraphEngine {
     return Object.fromEntries(map.entries());
   }
 
-  public invalidateSkill(skillId: string): void {
-    this.snapshots.delete(skillId);
+  public invalidateSkill(skillId: string, preservePassive = true): void {
+    if (!preservePassive) {
+      this.snapshots.delete(skillId);
+      return;
+    }
+    const skillMap = this.snapshots.get(skillId);
+    if (!skillMap) return;
+    for (const [nodeId, snap] of skillMap.entries()) {
+      if (snap.runtime !== "passive") {
+        skillMap.delete(nodeId);
+      }
+    }
   }
 
   public invalidateByContextKey(skill: CanonicalSkill, contextKey: string): void {
@@ -736,15 +810,18 @@ export class ReactiveGraphEngine {
           intermediate: Boolean(targetNode?.intermediate || (targetNode as any)?.hidden),
           rawParsed: parsed,
           consumedBy: this.getReverseConsumers(skill, intoDataId),
-          shape,
+          resolvedSource: `(populated by action: ${actionId})`,
+          shape: normalized.resolvedShape || shape,
           runtime: targetNode?.runtime || "passive",
           status: "ready",
           value: normalized.value,
           options: normalized.options,
+          selectContextKey: targetNode?.selectContextKey,
           quickActions: targetNode?.quickActions || [],
           rowActions: targetNode?.rowActions || [],
           bulkActions: targetNode?.bulkActions || [],
           cellAction: targetNode?.cellAction,
+          nodeActions: targetNode?.nodeActions || [],
           stdout: rawStdout,
           stderr: "",
           exitCode: 0,
@@ -821,9 +898,10 @@ export class ReactiveGraphEngine {
     const allActions = collectActions(skill.manifest.actionGroups || []);
     for (const action of allActions) {
       const hasFromData = (action.form || []).some((f) => f.fromData === nodeId);
+      const hasPrecondition = (action.preconditions || []).some((p) => p.dataNodeId === nodeId);
       const scriptText = action.script || action.command || "";
       const hasImplicit = extractImplicitDependencies(scriptText).dataNodeIds.includes(nodeId);
-      if (hasFromData || hasImplicit) {
+      if (hasFromData || hasPrecondition || hasImplicit) {
         consumers.add(`action:${action.id}`);
       }
     }
@@ -990,15 +1068,17 @@ export class ReactiveGraphEngine {
             badgeText: nodeEnv.badgeText,
           },
           resolvedSource: execOut.resolvedSource,
-          shape: node.shape || "raw",
+          shape: normalized.resolvedShape || node.shape || "raw",
           runtime: node.runtime || "zsh",
           status: execOut.exitCode === 0 ? "ready" : "error",
           value: normalized.value,
           options: normalized.options,
+          selectContextKey: node.selectContextKey,
           quickActions: node.quickActions || [],
           rowActions: node.rowActions || [],
           bulkActions: node.bulkActions || [],
           cellAction: node.cellAction,
+          nodeActions: node.nodeActions || [],
           stdout: execOut.stdout,
           stderr: execOut.stderr,
           exitCode: execOut.exitCode,
@@ -1239,12 +1319,13 @@ export class ReactiveGraphEngine {
     if (runtime === "passive") {
       const existing = this.snapshots.get(skill.id)?.get(node.id);
       return {
-        structured: existing?.value,
+        structured: existing?.rawParsed !== undefined ? existing.rawParsed : existing?.value,
         stdout: existing?.stdout || "",
         stderr: "",
         exitCode: 0,
         timedOut: false,
-        resolvedSource: "(passive node — populated via Action output.intoData)",
+        resolvedSource:
+          existing?.resolvedSource || "(passive node — populated via Action output.intoData)",
       };
     }
 
@@ -1355,10 +1436,28 @@ export class ReactiveGraphEngine {
       const dbRaw = rawDb.startsWith("~/")
         ? join(osModule.homedir(), rawDb.slice(2))
         : rawDb;
-      const dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(cwd, dbRaw);
+      let dbPath = isAbsolute(dbRaw) ? dbRaw : resolve(cwd, dbRaw);
+      if (
+        !existsSync(dbPath) &&
+        dbRaw.endsWith("skill-dashboard/dashboard.db") &&
+        this.paths?.dbPath &&
+        existsSync(this.paths.dbPath)
+      ) {
+        dbPath = this.paths.dbPath;
+      }
       const sqlText = this.interpolateText(skill, node.sql || "", false, nodeEnv);
       const sqliteSummary = `-- db: ${dbPath}\n${sqlText}`;
       if (!existsSync(dbPath)) {
+        if (dbRaw.endsWith("skill-dashboard/dashboard.db")) {
+          return {
+            structured: [],
+            stdout: "[]",
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+            resolvedSource: sqliteSummary,
+          };
+        }
         return { stdout: "", stderr: `SQLite DB not found: ${dbRaw}`, exitCode: 1, timedOut: false, resolvedSource: sqliteSummary };
       }
       const sqldb = new Database(dbPath, { readonly: true });

@@ -3,10 +3,16 @@ import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, resolve } from "path";
 import type {
   ActionItem,
+  ActionPrecondition,
   CommandEnvConfig,
+  DataShape,
   DataSnapshot,
   FormField,
+  FormFieldOption,
+  GraphEdgeItem,
+  GraphNodeItem,
   ResolvedCommandEnvSummary,
+  TreeNodeItem,
 } from "./types.ts";
 
 export function getDashboardEngineRoot(): string {
@@ -372,25 +378,38 @@ export function resolveDataSnapshotPath(
     return typeof snap.value === "object" ? JSON.stringify(snap.value) : String(snap.value);
   }
 
-  let curr: any = snap.value;
-  for (let i = 1; i < parts.length; i++) {
-    const key = parts[i]!;
-    if (curr === null || curr === undefined) return "";
-    if (Array.isArray(curr) && /^\d+$/.test(key)) {
-      curr = curr[Number(key)];
-    } else if (typeof curr === "object" && key in curr) {
-      curr = curr[key];
-    } else if (snap.shape === "kv" && curr.record && typeof curr.record === "object" && key in curr.record) {
-      curr = curr.record[key];
-    } else if (snap.shape === "table" && Array.isArray(curr.rows) && /^\d+$/.test(key)) {
-      curr = curr.rows[Number(key)];
-    } else {
-      return "";
+  const traversePath = (root: any): any => {
+    let curr = root;
+    for (let i = 1; i < parts.length; i++) {
+      const key = parts[i]!;
+      if (curr === null || curr === undefined) return undefined;
+      if (Array.isArray(curr) && /^\d+$/.test(key)) {
+        curr = curr[Number(key)];
+      } else if (typeof curr === "object" && key in curr) {
+        curr = curr[key];
+      } else if (
+        typeof curr === "object" &&
+        curr.record &&
+        typeof curr.record === "object" &&
+        key in curr.record
+      ) {
+        curr = curr.record[key];
+      } else if (typeof curr === "object" && Array.isArray(curr.rows) && /^\d+$/.test(key)) {
+        curr = curr.rows[Number(key)];
+      } else {
+        return undefined;
+      }
     }
+    return curr;
+  };
+
+  let found = traversePath(snap.value);
+  if (found === undefined && snap.rawParsed !== undefined) {
+    found = traversePath(snap.rawParsed);
   }
 
-  if (curr === null || curr === undefined) return "";
-  return typeof curr === "object" ? JSON.stringify(curr) : String(curr);
+  if (found === null || found === undefined) return "";
+  return typeof found === "object" ? JSON.stringify(found) : String(found);
 }
 
 export function interpolateBoundTriggerArgs(
@@ -399,13 +418,21 @@ export function interpolateBoundTriggerArgs(
     row?: Record<string, unknown>;
     selectedRows?: Record<string, unknown>[];
     cell?: { rowKey: string; colKey: string; value: unknown };
+    node?: {
+      id: string;
+      label?: string;
+      value?: unknown;
+      path?: string;
+      upstreamIds?: string[];
+      downstreamIds?: string[];
+    };
     contextValues?: Record<string, unknown>;
     dataSnapshots?: Record<string, DataSnapshot | undefined>;
   }
 ): Record<string, unknown> {
   if (!rawArgs) return {};
   const out: Record<string, unknown> = {};
-  const { row, selectedRows, cell, contextValues = {}, dataSnapshots = {} } = bindingScope;
+  const { row, selectedRows, cell, node, contextValues = {}, dataSnapshots = {} } = bindingScope;
 
   for (const [k, v] of Object.entries(rawArgs)) {
     if (typeof v !== "string") {
@@ -434,6 +461,18 @@ export function interpolateBoundTriggerArgs(
         .replace(/\{\{\s*cell\.rowKey\s*\}\}/g, String(cell.rowKey))
         .replace(/\{\{\s*cell\.colKey\s*\}\}/g, String(cell.colKey))
         .replace(/\{\{\s*cell\.value\s*\}\}/g, cell.value !== undefined && cell.value !== null ? String(cell.value) : "");
+    }
+    if (node) {
+      str = str
+        .replace(/\{\{\s*node\.id\s*\}\}/g, String(node.id ?? ""))
+        .replace(/\{\{\s*node\.label\s*\}\}/g, String(node.label ?? node.id ?? ""))
+        .replace(
+          /\{\{\s*node\.value\s*\}\}/g,
+          node.value !== undefined && node.value !== null ? String(node.value) : ""
+        )
+        .replace(/\{\{\s*node\.path\s*\}\}/g, String(node.path ?? node.id ?? ""))
+        .replace(/\{\{\s*node\.upstreamIds\s*\}\}/g, (node.upstreamIds || []).join(","))
+        .replace(/\{\{\s*node\.downstreamIds\s*\}\}/g, (node.downstreamIds || []).join(","));
     }
     str = str.replace(/\{\{\s*context\.([a-zA-Z0-9_-]+)\s*\}\}/g, (_m, ctxKey) => {
       const val = contextValues[ctxKey];
@@ -763,4 +802,359 @@ export function interpolateActionCommand(params: {
     resolvedEnv,
     venvDir: resolvedEnv.venvDir,
   };
+}
+
+export function isExplicitTreeNodeArray(data: unknown): boolean {
+  return (
+    Array.isArray(data) &&
+    data.length > 0 &&
+    data.every(
+      (it) =>
+        it &&
+        typeof it === "object" &&
+        "label" in it &&
+        ("children" in it || "id" in it || "meta" in it || "tone" in it)
+    )
+  );
+}
+
+export function normalizeExplicitTreeNodes(nodes: any[], parentPath = ""): TreeNodeItem[] {
+  return nodes.map((n, idx) => {
+    const id = String(n.id ?? `${parentPath ? parentPath + "." : ""}${idx}`);
+    const currentPath = n.path ? String(n.path) : parentPath ? `${parentPath}.${id}` : id;
+    const children = Array.isArray(n.children)
+      ? normalizeExplicitTreeNodes(n.children, currentPath)
+      : undefined;
+    return {
+      id,
+      label: String(n.label ?? id),
+      value:
+        typeof n.value === "string" || typeof n.value === "number" || typeof n.value === "boolean"
+          ? n.value
+          : undefined,
+      meta: n.meta != null ? String(n.meta) : undefined,
+      tone: n.tone,
+      path: currentPath,
+      actionId: n.actionId,
+      args: n.args,
+      children,
+    };
+  });
+}
+
+export function buildTreeFromArbitraryData(
+  data: unknown,
+  parentPath = "",
+  maxDepth = 8,
+  depth = 0
+): TreeNodeItem[] {
+  if (data === null || data === undefined) return [];
+  if (depth >= maxDepth) {
+    return [
+      {
+        id: parentPath || "leaf",
+        label: JSON.stringify(data),
+        path: parentPath || "leaf",
+      },
+    ];
+  }
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    Array.isArray((data as any).roots)
+  ) {
+    return normalizeExplicitTreeNodes((data as any).roots, parentPath);
+  }
+  if (isExplicitTreeNodeArray(data)) {
+    return normalizeExplicitTreeNodes(data as any[], parentPath);
+  }
+  if (Array.isArray(data)) {
+    return data.map((item, idx) => {
+      const currentPath = parentPath ? `${parentPath}[${idx}]` : `[${idx}]`;
+      if (item !== null && typeof item === "object") {
+        const summary =
+          (item as any).title ||
+          (item as any).label ||
+          (item as any).name ||
+          (item as any).id ||
+          `[${idx}]`;
+        const nodeId = String((item as any).id ?? currentPath);
+        return {
+          id: nodeId,
+          label: String(summary),
+          path: currentPath,
+          meta: Array.isArray(item)
+            ? `${item.length} items`
+            : `${Object.keys(item).length} keys`,
+          children: buildTreeFromArbitraryData(item, currentPath, maxDepth, depth + 1),
+        };
+      }
+      return {
+        id: currentPath,
+        label: `[${idx}]`,
+        value: String(item),
+        path: currentPath,
+      };
+    });
+  }
+  if (typeof data === "object") {
+    return Object.entries(data as Record<string, unknown>).map(([k, v]) => {
+      const currentPath = parentPath ? `${parentPath}.${k}` : k;
+      if (v !== null && typeof v === "object") {
+        const count = Array.isArray(v)
+          ? `${v.length} items`
+          : `${Object.keys(v).length} keys`;
+        return {
+          id: currentPath,
+          label: k,
+          path: currentPath,
+          meta: count,
+          children: buildTreeFromArbitraryData(v, currentPath, maxDepth, depth + 1),
+        };
+      }
+      return {
+        id: currentPath,
+        label: k,
+        value: v === null ? "null" : (v as string | number | boolean),
+        path: currentPath,
+      };
+    });
+  }
+  return [{ id: parentPath || "root", label: String(data), path: parentPath || "root" }];
+}
+
+export function collectTreeLeafOptions(roots: TreeNodeItem[]): FormFieldOption[] {
+  const out: FormFieldOption[] = [];
+  const walk = (nodes: TreeNodeItem[]) => {
+    for (const n of nodes) {
+      if (n.children && n.children.length > 0) {
+        walk(n.children);
+      } else {
+        const val = n.value !== undefined ? String(n.value) : n.id;
+        out.push({
+          value: val,
+          label: n.path ? `${n.path}: ${n.label}` : n.label,
+          meta: n.meta,
+        });
+      }
+    }
+  };
+  walk(roots);
+  return out;
+}
+
+export function computeGraphTopology(
+  rawNodes: any[],
+  rawEdges: any[]
+): {
+  nodes: GraphNodeItem[];
+  edges: GraphEdgeItem[];
+} {
+  const nodeMap = new Map<string, GraphNodeItem>();
+  for (const n of rawNodes || []) {
+    if (!n || typeof n !== "object") continue;
+    const id = String(n.id ?? n.name ?? n.value ?? "");
+    if (!id) continue;
+    nodeMap.set(id, {
+      id,
+      label: String(n.label ?? n.title ?? id),
+      value: n.value != null ? String(n.value) : id,
+      meta: n.meta != null ? String(n.meta) : undefined,
+      group: n.group != null ? String(n.group) : undefined,
+      tone: n.tone || "neutral",
+      layer: typeof n.layer === "number" ? n.layer : undefined,
+      actionId: n.actionId,
+      args: n.args,
+    });
+  }
+
+  const edges: GraphEdgeItem[] = [];
+  for (const e of rawEdges || []) {
+    if (!e || typeof e !== "object") continue;
+    const source = String(e.source ?? e.from ?? "");
+    const target = String(e.target ?? e.to ?? "");
+    if (!source || !target) continue;
+    if (!nodeMap.has(source)) {
+      nodeMap.set(source, { id: source, label: source, value: source, tone: "neutral" });
+    }
+    if (!nodeMap.has(target)) {
+      nodeMap.set(target, { id: target, label: target, value: target, tone: "neutral" });
+    }
+    edges.push({
+      source,
+      target,
+      label: e.label != null ? String(e.label) : undefined,
+      animated: Boolean(e.animated),
+      tone: e.tone,
+    });
+  }
+
+  const adjOut = new Map<string, Set<string>>();
+  const adjIn = new Map<string, Set<string>>();
+  for (const id of nodeMap.keys()) {
+    adjOut.set(id, new Set());
+    adjIn.set(id, new Set());
+  }
+  for (const e of edges) {
+    if (e.source === e.target) continue;
+    adjOut.get(e.source)!.add(e.target);
+    adjIn.get(e.target)!.add(e.source);
+  }
+
+  const inDegree = new Map<string, number>();
+  const computedLayer = new Map<string, number>();
+  for (const [id, ins] of adjIn.entries()) {
+    inDegree.set(id, ins.size);
+    computedLayer.set(id, 0);
+  }
+
+  const queue: string[] = [];
+  for (const [id, deg] of inDegree.entries()) {
+    if (deg === 0) queue.push(id);
+  }
+
+  const visitedKahn = new Set<string>();
+  while (queue.length > 0) {
+    const u = queue.shift()!;
+    visitedKahn.add(u);
+    const uLayer = computedLayer.get(u) || 0;
+    for (const v of adjOut.get(u) || []) {
+      computedLayer.set(v, Math.max(computedLayer.get(v) || 0, uLayer + 1));
+      const nextDeg = (inDegree.get(v) || 0) - 1;
+      inDegree.set(v, nextDeg);
+      if (nextDeg === 0) queue.push(v);
+    }
+  }
+
+  let fallbackLayer = Math.max(0, ...computedLayer.values()) + 1;
+  for (const id of nodeMap.keys()) {
+    if (!visitedKahn.has(id)) {
+      computedLayer.set(id, fallbackLayer++);
+    }
+  }
+
+  const collectReachable = (startId: string, adj: Map<string, Set<string>>): string[] => {
+    const visited = new Set<string>();
+    const q = [...(adj.get(startId) || [])];
+    while (q.length > 0) {
+      const curr = q.shift()!;
+      if (curr === startId || visited.has(curr)) continue;
+      visited.add(curr);
+      for (const nxt of adj.get(curr) || []) {
+        if (!visited.has(nxt) && nxt !== startId) q.push(nxt);
+      }
+    }
+    return [...visited];
+  };
+
+  const finalNodes: GraphNodeItem[] = [];
+  for (const [id, node] of nodeMap.entries()) {
+    finalNodes.push({
+      ...node,
+      layer: node.layer !== undefined ? node.layer : (computedLayer.get(id) ?? 0),
+      upstreamIds: collectReachable(id, adjIn),
+      downstreamIds: collectReachable(id, adjOut),
+    });
+  }
+
+  return { nodes: finalNodes, edges };
+}
+
+export function inferAutoDataShape(data: unknown): Exclude<DataShape, "auto"> {
+  if (data === null || data === undefined || typeof data === "string") return "raw";
+  if (typeof data === "number" || typeof data === "boolean") return "scalar";
+  if (typeof data === "object" && !Array.isArray(data)) {
+    const obj = data as Record<string, unknown>;
+    if (Array.isArray(obj.nodes) && Array.isArray(obj.edges)) return "graph";
+    if (Array.isArray(obj.roots)) return "tree";
+    if ("rowKeys" in obj && "colKeys" in obj && "cells" in obj) return "matrix";
+    if ("value" in obj && Object.keys(obj).length <= 4 && typeof obj.value !== "object") {
+      return "scalar";
+    }
+    const vals = Object.values(obj);
+    const hasNestedObjectOrArray = vals.some((v) => v !== null && typeof v === "object");
+    return hasNestedObjectOrArray ? "tree" : "kv";
+  }
+  if (Array.isArray(data)) {
+    if (isExplicitTreeNodeArray(data)) return "tree";
+    if (data.length > 0 && data.every((x) => typeof x !== "object" || x === null)) return "list";
+    return "table";
+  }
+  return "raw";
+}
+
+export function evaluateActionPrecondition(
+  pre: ActionPrecondition,
+  snapshots: Record<string, DataSnapshot | undefined>
+): { passed: boolean; actualSummary: string } {
+  const snap = snapshots[pre.dataNodeId];
+  if (!snap || snap.status === "loading" || snap.status === "idle") {
+    return { passed: true, actualSummary: "loading" };
+  }
+  if (snap.status === "error") {
+    return { passed: false, actualSummary: `DataNode "${pre.dataNodeId}" is in error state` };
+  }
+
+  if (pre.minRows !== undefined) {
+    const rows = Array.isArray(snap.value?.rows)
+      ? snap.value.rows.length
+      : Array.isArray(snap.value?.items)
+        ? snap.value.items.length
+        : Array.isArray(snap.value?.nodes)
+          ? snap.value.nodes.length
+          : Array.isArray(snap.value?.roots)
+            ? snap.value.roots.length
+            : Array.isArray(snap.rawParsed)
+              ? snap.rawParsed.length
+              : 0;
+    return {
+      passed: rows >= pre.minRows,
+      actualSummary: `${rows} row(s) (min ${pre.minRows})`,
+    };
+  }
+
+  const targetVal = pre.field
+    ? resolveDataSnapshotPath(snapshots, `${pre.dataNodeId}.${pre.field}`)
+    : resolveDataSnapshotPath(snapshots, pre.dataNodeId);
+
+  if (pre.notEmpty) {
+    const rowsLen = Array.isArray(snap.value?.rows)
+      ? snap.value.rows.length
+      : Array.isArray(snap.value?.items)
+        ? snap.value.items.length
+        : Array.isArray(snap.value?.roots)
+          ? snap.value.roots.length
+          : Array.isArray(snap.value?.nodes)
+            ? snap.value.nodes.length
+            : undefined;
+    if (rowsLen !== undefined && !pre.field) {
+      return { passed: rowsLen > 0, actualSummary: `${rowsLen} items` };
+    }
+    const nonEmpty = targetVal.trim().length > 0 && targetVal !== "[]" && targetVal !== "{}";
+    return { passed: nonEmpty, actualSummary: targetVal || "(empty)" };
+  }
+
+  if (pre.equals !== undefined) {
+    return {
+      passed: String(targetVal) === String(pre.equals),
+      actualSummary: targetVal || "(empty)",
+    };
+  }
+
+  if (pre.notEquals !== undefined) {
+    return {
+      passed: String(targetVal) !== String(pre.notEquals),
+      actualSummary: targetVal || "(empty)",
+    };
+  }
+
+  if (pre.contains !== undefined) {
+    return {
+      passed: String(targetVal).includes(pre.contains),
+      actualSummary: targetVal || "(empty)",
+    };
+  }
+
+  return { passed: true, actualSummary: targetVal };
 }

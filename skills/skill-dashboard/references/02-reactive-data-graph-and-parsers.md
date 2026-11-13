@@ -152,17 +152,22 @@ transform:
 
 ---
 
-## 4. The 7 Canonical Shapes (`shape:`) & Interactive Bindings
+## 4. 5 Data Primitives, Decoupled Views (`shape:`) & Interactive Bindings
 
-| `shape` | Expected Return / Value Structure | UI Widget Rendered |
-| :--- | :--- | :--- |
-| `scalar` | `{ value: string\|number, unit?: string, label?: string, tone?: "neutral"\|"info"\|"success"\|"warn"\|"danger" }` (or primitive) | High-contrast KPI metric card |
-| `kv` | `Record<string, string\|number\|boolean>` or `{ entries: [{ key, label, value, tone }] }` | 2-column Key-Value status grid |
-| `list` | `Array<string \| { label, value, meta }>` | Compact badge/item list + dropdown option source |
-| `table` | `Array<Record<string, unknown>>` or `{ columns, rows, primaryKey }` | `InteractiveDataTable` with search, typed columns, `rowActions`, `bulkActions`, and HITL row submission |
-| `matrix` | `{ rowAxis, colAxis, rows: [{ key, label, cells: Record<colKey, { value, tone }> }] }` | 2D `PivotMatrix` with clickable `cellAction` |
-| `stream` | NDJSON stream events (`{ op: "upsert"\|"patch"\|"delete"\|"reset", key, row }`) | Live-folding table or log stream |
-| `raw` | `string` (ANSI color codes supported) | Collapsible terminal-styled output card |
+Skill Dashboard decouples the **Data Model Layer** (5 orthogonal primitives preserved losslessly in `DataSnapshot.rawParsed`: `Scalar`, `Document/Tree`, `Records`, `Graph`, `Raw`) from the **UI Presentation Layer (`shape`)**, providing both declarative YAML defaults and an in-card **View Switcher** (`KV ⇄ Tree`, `Table ⇄ Matrix ⇄ List ⇄ Tree`, `Graph ⇄ Table ⇄ Tree`):
+
+| `shape` | Data Primitive | Expected Return / Value Structure | UI Widget Rendered |
+| :--- | :--- | :--- | :--- |
+| `scalar` | `Scalar` | `{ value: string\|number, unit?: string, label?: string, tone?: "neutral"\|"info"\|"success"\|"warn"\|"danger" }` (or primitive) | High-contrast KPI metric card |
+| `kv` | `Document / Tree` | `Record<string, unknown>` or `{ entries: [{ key, label, value, rawValue?, tone }] }` | 2-column Key-Value grid with inline expandable nested JSON sub-trees (`KV ⇄ Tree`) |
+| `tree` | `Document / Tree` | Arbitrary nested JSON object/array or explicit `Array<{ id, label, value?, meta?, children? }>` | Collapsible hierarchy explorer (`Expand All / Collapse All`, search, `nodeActions`) |
+| `table` | `Records` | `Array<Record<string, unknown>>` or `{ columns, rows, primaryKey }` | `InteractiveDataTable` with search, typed columns, `selectContextKey`, `rowActions`, `bulkActions` (`Table ⇄ Matrix ⇄ List ⇄ Tree`) |
+| `matrix` | `Records` | `Array<Record<string, unknown>>` + `pivot: { rowKey, colKey, valueKey }` (or `{ rowKeys, colKeys, cells }`) | 2D `PivotMatrix` with clickable `cellAction` (`{{cell.rowKey}}`, `{{cell.colKey}}`, `{{cell.value}}`) |
+| `list` | `Records` | `Array<string \| { label, value, meta }>` | High-density interactive pill stream + `selectContextKey` + dropdown option source |
+| `graph` | `Graph` | `{ nodes: Array<{ id, label, group?, meta?, tone? }>, edges: Array<{ source, target, label? }> }` | Layered Directed Graph (`InteractiveGraphWidget`) with automatic Kahn topological `layer`, BFS `upstreamIds` / `downstreamIds` blast radius, and `nodeActions` (`{{node.id}}`, `{{node.upstreamIds}}`, `{{node.downstreamIds}}`) |
+| `stream` | `Raw / Stream` | NDJSON stream events (`{ op: "upsert"\|"patch"\|"delete"\|"reset", key, row }`) | Live-folding table or log stream |
+| `raw` | `Raw` | `string` (ANSI color codes supported) | Collapsible terminal-styled output card |
+| `auto` | Adaptive | Any JSON/text output | Automatically selects `graph`, `tree`, `kv`, `table`, `list`, `scalar`, or `raw` based on payload structure and nesting depth |
 
 ### `table` Column Types & Interactive Action Triggers
 ```yaml

@@ -14,7 +14,7 @@ import {
 } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
-import { interpolateBoundTriggerArgs } from "../src/interpolator.ts";
+import { interpolateBoundTriggerArgs, resolveDataSnapshotPath } from "../src/interpolator.ts";
 import {
   buildManifestSymbolGraph,
   formatManifestMapReport,
@@ -2694,6 +2694,260 @@ actionGroups:
       // 6. Verify built frontend bundle (dist/app.js) does not contain server-only import.meta.dir calls
       const distAppJs = readFileSync(resolve(process.cwd(), "dist/app.js"), "utf-8");
       expect(distAppJs).not.toContain("import.meta.dir");
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  test("18. 5-Primitive Data Model & View Decoupling (kv Nested JSON, tree, graph Kahn Layering & Impact Radius, list, matrix), selectContextKey, preconditions, Protected passive intoData & Full skill-dashboard Dogfooding", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-test-18-"));
+    const agentsDir = join(tmpBase, "agents");
+    mkdirSync(agentsDir, { recursive: true });
+
+    // 1. Symlink the real skills/skill-dashboard into our isolated test agentsDir
+    const realSkillSubdir = resolve(process.cwd(), "skills/skill-dashboard");
+    symlinkSync(realSkillSubdir, join(agentsDir, "skill-dashboard"));
+
+    // 2. Also create a synthetic skill to test arbitrary JSON tree, graph cycle/dangling-edge resilience, and L2 validation of nodeActions/selectContextKey/preconditions
+    const synthDir = join(agentsDir, "prim-lab");
+    mkdirSync(join(synthDir, ".dashboard"), { recursive: true });
+    writeFileSync(join(synthDir, "SKILL.md"), "---\nname: prim-lab\ndescription: Primitive Lab\n---\n# Prim Lab\n");
+    writeFileSync(
+      join(synthDir, ".dashboard/manifest.yaml"),
+      [
+        "id: prim-lab",
+        'name: "Primitive Lab"',
+        'category: "Engineering Tools"',
+        'description: "Tests 5 primitives"',
+        "tsPrelude: true",
+        "context:",
+        "  - key: selected_item",
+        '    label: "Selected Item"',
+        "    type: text",
+        '    default: "all"',
+        "data:",
+        "  - id: deep-json-tree",
+        '    title: "Arbitrary Nested JSON as Tree"',
+        "    runtime: ts",
+        "    shape: tree",
+        '    selectContextKey: "selected_item"',
+        "    nodeActions:",
+        '      - label: "Inspect Node"',
+        "        actionId: echo-node",
+        "        args:",
+        '          target_id: "{{node.id}}"',
+        '          downstream: "{{node.downstreamIds}}"',
+        "    code: |",
+        "      return {",
+        "        cluster: { region: 'us-west-2', replicas: 3 },",
+        "        services: [{ id: 'svc-api', port: 8080 }, { id: 'svc-worker', port: 9090 }]",
+        "      };",
+        "  - id: cyclic-graph",
+        '    title: "Graph with Cycle & Dangling Edge"',
+        "    runtime: ts",
+        "    shape: graph",
+        "    nodeActions:",
+        '      - label: "Blast Radius"',
+        "        actionId: echo-node",
+        "        args:",
+        '          target_id: "{{node.id}}"',
+        '          upstream: "{{node.upstreamIds}}"',
+        '          downstream: "{{node.downstreamIds}}"',
+        "    code: |",
+        "      return {",
+        "        nodes: [",
+        "          { id: 'n_root', label: 'Root Source' },",
+        "          { id: 'n_mid', label: 'Middle Transform' },",
+        "          { id: 'n_leaf', label: 'Leaf Sink' },",
+        "          { id: 'c_1', label: 'Cycle A' },",
+        "          { id: 'c_2', label: 'Cycle B' }",
+        "        ],",
+        "        edges: [",
+        "          { source: 'n_root', target: 'n_mid', label: 'feeds' },",
+        "          { source: 'n_mid', target: 'n_leaf', label: 'derives' },",
+        "          { source: 'n_leaf', target: 'n_dangling', label: 'implicit' },",
+        "          { source: 'c_1', target: 'c_2' },",
+        "          { source: 'c_2', target: 'c_1' }",
+        "        ]",
+        "      };",
+        "actionGroups:",
+        '  - name: "Lab Actions"',
+        "    actions:",
+        "      - id: echo-node",
+        '        title: "Echo Node Impact"',
+        "        danger: safe",
+        '        command: "echo {{form.target_id}} {{form.upstream}} {{form.downstream}}"',
+        "        preconditions:",
+        "          - dataNodeId: deep-json-tree",
+        "            notEmpty: true",
+        '            message: "Tree must not be empty"',
+        "            fixActionId: echo-node",
+        "        form:",
+        "          - key: target_id",
+        '            label: "Target ID"',
+        "            type: text",
+        "          - key: upstream",
+        '            label: "Upstream IDs"',
+        "            type: text",
+        "          - key: downstream",
+        '            label: "Downstream IDs"',
+        "            type: text",
+      ].join("\n")
+    );
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: tmpBase,
+      homeDir: tmpBase,
+    });
+
+    try {
+      // A. Verify prim-lab arbitrary JSON tree & cyclic/dangling graph topology
+      const labRes = (await (await fetch(`${srv.url}/api/skills/prim-lab/data`)).json()) as any;
+      const treeSnap = labRes.snapshots["deep-json-tree"];
+      expect(treeSnap.status).toBe("ready");
+      expect(treeSnap.shape).toBe("tree");
+      expect(treeSnap.selectContextKey).toBe("selected_item");
+      expect(Array.isArray(treeSnap.value.roots)).toBe(true);
+      expect(treeSnap.value.roots.length).toBe(2);
+      expect(treeSnap.value.roots[0].label).toBe("cluster");
+      expect(treeSnap.value.roots[0].children.length).toBe(2);
+      expect(treeSnap.options.length).toBeGreaterThan(0);
+
+      const graphSnap = labRes.snapshots["cyclic-graph"];
+      expect(graphSnap.status).toBe("ready");
+      expect(graphSnap.shape).toBe("graph");
+      const gNodes: any[] = graphSnap.value.nodes;
+      const rootNode = gNodes.find((n) => n.id === "n_root");
+      const midNode = gNodes.find((n) => n.id === "n_mid");
+      const danglingNode = gNodes.find((n) => n.id === "n_dangling");
+      const cyc1 = gNodes.find((n) => n.id === "c_1");
+      expect(rootNode.layer).toBe(0);
+      expect(midNode.layer).toBe(1);
+      expect(danglingNode).toBeDefined();
+      expect(danglingNode.layer).toBe(3);
+      expect(rootNode.downstreamIds).toEqual(["n_mid", "n_leaf", "n_dangling"]);
+      expect(midNode.upstreamIds).toEqual(["n_root"]);
+      expect(midNode.downstreamIds).toEqual(["n_leaf", "n_dangling"]);
+      expect(cyc1.downstreamIds).toEqual(["c_2"]);
+
+      // Verify interpolateBoundTriggerArgs with {{node.*}}
+      const resolvedNodeArgs = interpolateBoundTriggerArgs(graphSnap.nodeActions[0].args, {
+        node: rootNode,
+      });
+      expect(resolvedNodeArgs).toEqual({
+        target_id: "n_root",
+        upstream: "",
+        downstream: "n_mid,n_leaf,n_dangling",
+      });
+
+      // B. Verify skill-dashboard dogfoods all canonical shapes & data-flow mechanisms
+      const sdDataRes = (await (
+        await fetch(`${srv.url}/api/skills/skill-dashboard/data`)
+      ).json()) as any;
+      const sdSnaps = sdDataRes.snapshots;
+
+      // 1. kv with lossless nested rawValue + deep resolveDataSnapshotPath
+      const telSnap = sdSnaps["service-telemetry"];
+      expect(telSnap.status).toBe("ready");
+      expect(telSnap.shape).toBe("kv");
+      const storageEntry = telSnap.value.entries.find((e: any) => e.key === "Storage Paths");
+      expect(storageEntry).toBeDefined();
+      expect(storageEntry.rawValue).toBeDefined();
+      expect(typeof storageEntry.rawValue.db).toBe("string");
+      expect(
+        resolveDataSnapshotPath(sdSnaps, "service-telemetry.Storage Paths.db")
+      ).toContain("dashboard.db");
+
+      // 2. Intermediate SQLite stats node + Multi-Source Join in skills-catalog-table + selectContextKey
+      expect(sdSnaps["skills-run-stats-raw"]).toBeDefined();
+      expect(sdSnaps["skills-run-stats-raw"].status).toBe("ready");
+      expect(sdSnaps["skills-run-stats-raw"].intermediate).toBe(true);
+
+      const catTable = sdSnaps["skills-catalog-table"];
+      expect(catTable.status).toBe("ready");
+      expect(catTable.selectContextKey).toBe("focus_skill");
+      expect(catTable.value.columns.some((c: any) => c.key === "totalRuns")).toBe(true);
+
+      // 3. Matrix, Graph, Tree, List, and Passive nodes in skill-dashboard
+      expect(sdSnaps["ecosystem-mount-matrix"]).toBeDefined();
+      expect(sdSnaps["ecosystem-mount-matrix"].status).toBe("ready");
+      expect(sdSnaps["ecosystem-mount-matrix"].shape).toBe("matrix");
+      expect(Array.isArray(sdSnaps["ecosystem-mount-matrix"].value.rowKeys)).toBe(true);
+
+      expect(sdSnaps["skill-reactive-graph"]).toBeDefined();
+      expect(sdSnaps["skill-reactive-graph"].status).toBe("ready");
+      expect(sdSnaps["skill-reactive-graph"].shape).toBe("graph");
+      expect(sdSnaps["skill-reactive-graph"].value.nodes.length).toBeGreaterThan(0);
+      expect(sdSnaps["skill-reactive-graph"].value.edges.length).toBeGreaterThan(0);
+
+      expect(sdSnaps["manifest-symbol-tree"]).toBeDefined();
+      expect(sdSnaps["manifest-symbol-tree"].status).toBe("ready");
+      expect(sdSnaps["manifest-symbol-tree"].shape).toBe("tree");
+      expect(sdSnaps["manifest-symbol-tree"].value.roots.length).toBeGreaterThan(0);
+
+      expect(sdSnaps["architecture-issues-list"]).toBeDefined();
+      expect(sdSnaps["architecture-issues-list"].status).toBe("ready");
+      expect(sdSnaps["architecture-issues-list"].shape).toBe("list");
+      expect(sdSnaps["architecture-issues-list"].value.items.length).toBeGreaterThan(0);
+
+      expect(sdSnaps["last-symbol-map-output"]).toBeDefined();
+      expect(sdSnaps["last-symbol-map-output"].runtime).toBe("passive");
+
+      // 4. Master-Detail context filtering via focus_skill
+      const ctxPutRes = (await (
+        await fetch(`${srv.url}/api/skills/skill-dashboard/context`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: "focus_skill", value: "skill-dashboard" }),
+        })
+      ).json()) as any;
+      expect(ctxPutRes.context.focus_skill).toBe("skill-dashboard");
+      expect(ctxPutRes.snapshots["manifest-symbol-tree"].status).toBe("ready");
+
+      // 5. Execute manifest-cli-map and verify output.intoData -> last-symbol-map-output survives ?invalidate=1
+      const runRes = (await (
+        await fetch(`${srv.url}/api/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "skill-dashboard",
+            actionId: "manifest-cli-map",
+            formValues: { skill_id: "skill-dashboard" },
+            runner: "web_terminal",
+          }),
+        })
+      ).json()) as any;
+      expect(runRes.runId).toBeDefined();
+
+      // Wait for run to complete
+      for (let i = 0; i < 40; i++) {
+        const b = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+        const r = b.runs.find((x: any) => x.id === runRes.runId);
+        if (r && r.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      // Simulate global refresh (?invalidate=1) triggered by UI after PTY run completes
+      await fetch(`${srv.url}/api/skills/skill-dashboard/context?invalidate=1`);
+      const passiveSnap = (await (
+        await fetch(`${srv.url}/api/skills/skill-dashboard/data/last-symbol-map-output`)
+      ).json()) as any;
+      expect(passiveSnap.status).toBe("ready");
+      expect(passiveSnap.stdout).toContain("skill-dashboard");
+
+      // 6. Verify 3-tier manifest validation passes with 0 errors on both prim-lab and skill-dashboard
+      const bootAfter = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+      const primLabSkill = bootAfter.skills.find((s: any) => s.id === "prim-lab");
+      const selfSkill = bootAfter.skills.find((s: any) => s.id === "skill-dashboard");
+      expect(validateSkillManifest3Tier(primLabSkill)).toEqual([]);
+      expect(validateSkillManifest3Tier(selfSkill)).toEqual([]);
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

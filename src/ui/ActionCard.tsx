@@ -11,10 +11,12 @@ import {
   Terminal,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
+import { evaluateActionPrecondition } from "../interpolator.ts";
 import type {
   ActionItem,
   CanonicalSkill,
   CommandEnvConfig,
+  DataSnapshot,
   FormField,
   ResolvedCommandEnvSummary,
 } from "../types.ts";
@@ -28,9 +30,11 @@ interface ActionCardProps {
   refreshTrigger?: number;
   prefillValues?: Record<string, unknown> | null;
   uiEnvOverride?: CommandEnvConfig;
+  dataSnapshots?: Record<string, DataSnapshot | undefined>;
   inAuditModal?: boolean;
   onExecuted?: () => void;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
+  onTriggerFixAction?: (actionId: string) => void;
   onExecute: (params: {
     actionId: string;
     formValues: Record<string, unknown>;
@@ -52,11 +56,14 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   refreshTrigger = 0,
   prefillValues,
   uiEnvOverride,
+  dataSnapshots = {},
   inAuditModal = false,
   onExecuted,
   onSkillUpdated,
+  onTriggerFixAction,
   onExecute,
 }) => {
+  const [extraSnapshots, setExtraSnapshots] = useState<Record<string, DataSnapshot>>({});
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() => {
     const initial: Record<string, unknown> = {};
     for (const f of action.form || []) {
@@ -160,7 +167,33 @@ export const ActionCard: React.FC<ActionCardProps> = ({
         fetchFieldDataNode(f, refreshTrigger > 0);
       }
     }
+    for (const pre of action.preconditions || []) {
+      if (pre.dataNodeId && !dataSnapshots[pre.dataNodeId]) {
+        fetch(
+          `/api/skills/${encodeURIComponent(skillId)}/data/${encodeURIComponent(pre.dataNodeId)}${
+            refreshTrigger > 0 ? "?force=1" : ""
+          }`
+        )
+          .then((r) => (r.ok ? r.json() : null))
+          .then((snap) => {
+            if (snap && snap.nodeId) {
+              setExtraSnapshots((prev) => ({ ...prev, [snap.nodeId]: snap }));
+            }
+          })
+          .catch(() => {});
+      }
+    }
   }, [skillId, action.id, activeWorkspace, refreshTrigger]);
+
+  const mergedSnapshots: Record<string, DataSnapshot | undefined> = {
+    ...extraSnapshots,
+    ...dataSnapshots,
+  };
+  const evaluatedPreconditions = (action.preconditions || []).map((pre) => ({
+    pre,
+    ...evaluateActionPrecondition(pre, mergedSnapshots),
+  }));
+  const failedPreconditions = evaluatedPreconditions.filter((p) => !p.passed);
 
   const [previewCmd, setPreviewCmd] = useState<string>(action.command);
   const [previewCwd, setPreviewCwd] = useState<string>(activeWorkspace);
@@ -407,6 +440,64 @@ export const ActionCard: React.FC<ActionCardProps> = ({
           }}
           onClose={() => setEnvPanelOpen(false)}
         />
+      )}
+
+      {/* Declarative Action Precondition Guards Banner */}
+      {evaluatedPreconditions.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {failedPreconditions.map(({ pre, actualSummary }, idx) => (
+            <div
+              key={idx}
+              className="px-3.5 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/35 text-xs flex items-center justify-between gap-3 flex-wrap"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                <div className="flex flex-col gap-0.5">
+                  <span className="font-bold text-amber-700 dark:text-amber-300">
+                    Precondition Warning: {pre.message}
+                  </span>
+                  <span className="font-mono text-[11px] st-text-secondary">
+                    Source: <code>data:{pre.dataNodeId}{pre.field ? `.${pre.field}` : ""}</code> · Current: <code>{actualSummary}</code>
+                  </span>
+                </div>
+              </div>
+              {pre.fixActionId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onTriggerFixAction) {
+                      onTriggerFixAction(pre.fixActionId!);
+                    } else {
+                      onExecute({
+                        actionId: pre.fixActionId!,
+                        formValues: {},
+                        runner: "web_terminal",
+                      });
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold shrink-0 shadow-sm"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  <span>Fix via {pre.fixActionId}</span>
+                </button>
+              )}
+            </div>
+          ))}
+          {failedPreconditions.length === 0 && (
+            <div className="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-[11px] font-mono text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+              <span>
+                Preconditions Verified ({evaluatedPreconditions.length}):{" "}
+                {evaluatedPreconditions
+                  .map(
+                    ({ pre, actualSummary }) =>
+                      `${pre.dataNodeId}${pre.field ? `.${pre.field}` : ""}=${actualSummary}`
+                  )
+                  .join(", ")}
+              </span>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Dynamic Form Fields */}

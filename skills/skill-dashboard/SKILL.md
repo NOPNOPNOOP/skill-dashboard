@@ -92,9 +92,9 @@ manifest-cli folder remove <dir_path>
 | `includes` / `defs` | `string[]` / `object` | No | Explicit modular YAML includes and reusable `$ref: "#/defs/<key>"` definitions. |
 | `envVars` | `SkillEnvVar[]` | No | Default environment variables preference (`Default Env (N)`), injected into commands unless overridden. |
 | `context` | `ContextField[]` | No | Global reactive state switchers (`select`, `toggle`, `text`) rendered in the top toolbar (`{{context.<key>}}`). |
-| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) producing `scalar`, `kv`, `list`, `table`, `matrix`, `stream`, or `raw` widgets. Supports `category` tabs, `intermediate: true` upstream DAG source nodes, and per-node `cwd`/`python`/`envFile`/`env`. |
+| `data` | `DataNode[]` | No | Polyglot reactive data nodes (`ts`, `python`, `sqlite`, `glob`, `file`, `zsh`, `passive`) decoupled into 5 data primitives and rendered via `scalar`, `kv` (with inline expandable nested JSON sub-trees), `tree`, `list`, `table`, `matrix`, `graph` (Kahn topological layering + upstream/downstream blast radius), `stream`, `raw`, or `auto` views with in-card View Switcher (`KV ⇄ Tree`, `Table ⇄ Matrix ⇄ List ⇄ Tree`, `Graph ⇄ Table ⇄ Tree`) and `selectContextKey` master-detail click drill-down. |
 | `views` | `SkillView[]` | No | Markdown docs (`type: markdown`) and Custom HTML App Views (`type: html` with `window.SkillDashboard` Bridge 2.0). |
-| `actionGroups` | `ActionGroup[]` | No | Hierarchical operational groups (`Group` $\rightarrow$ `subgroup` $\rightarrow$ `ActionItem`). Supports per-action `cwd`/`python`/`envFile`/`env`. |
+| `actionGroups` | `ActionGroup[]` | No | Hierarchical operational groups (`Group` $\rightarrow$ `subgroup` $\rightarrow$ `ActionItem`). Supports per-action `cwd`/`python`/`envFile`/`env`, `preconditions` data-state guards, and `output.intoData` feedback loops. |
 
 ### 3.2 Template Variables & Flag Auto-Binding
 - **`{{python}}`**: Auto-detects nearest `.venv/bin/python` from the command's own resolved `cwd` first (walking up to 4 parent dirs), before falling back to `<effectiveWorkspace>/.venv/bin/python` or `python3`.
