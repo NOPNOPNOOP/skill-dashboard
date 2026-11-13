@@ -2690,6 +2690,10 @@ actionGroups:
       const skillMd = readFileSync(join(realSkillSubdir, "SKILL.md"), "utf-8");
       expect(skillMd).toContain("intermediate: true");
       expect(skillMd).toContain("{{manifest_cli}}");
+
+      // 6. Verify built frontend bundle (dist/app.js) does not contain server-only import.meta.dir calls
+      const distAppJs = readFileSync(resolve(process.cwd(), "dist/app.js"), "utf-8");
+      expect(distAppJs).not.toContain("import.meta.dir");
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

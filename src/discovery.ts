@@ -17,7 +17,7 @@ import { tmpdir } from "os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { resolveSkillCascade } from "./cascade.ts";
 import {
-  DASHBOARD_ENGINE_ROOT,
+  getDashboardEngineRoot,
   resolvePythonExecutable,
   shellEscape,
 } from "./interpolator.ts";
@@ -193,9 +193,10 @@ function resolveManifestDefaultWorkspace(
   homeDir: string,
   realPath: string
 ): string | undefined {
+  const engineRoot = getDashboardEngineRoot();
   if (!rawDefaultWs) {
-    if (skillId === "skill-dashboard" && existsSync(join(DASHBOARD_ENGINE_ROOT, "package.json"))) {
-      return DASHBOARD_ENGINE_ROOT;
+    if (skillId === "skill-dashboard" && engineRoot && existsSync(join(engineRoot, "package.json"))) {
+      return engineRoot;
     }
     return undefined;
   }
@@ -204,8 +205,8 @@ function resolveManifestDefaultWorkspace(
     if (existsSync(expanded) && existsSync(join(expanded, "package.json"))) {
       return expanded;
     }
-    if (existsSync(join(DASHBOARD_ENGINE_ROOT, "package.json"))) {
-      return DASHBOARD_ENGINE_ROOT;
+    if (engineRoot && existsSync(join(engineRoot, "package.json"))) {
+      return engineRoot;
     }
   }
   return existsSync(expanded) ? expanded : undefined;

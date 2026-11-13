@@ -9,8 +9,13 @@ import type {
   ResolvedCommandEnvSummary,
 } from "./types.ts";
 
-export const DASHBOARD_ENGINE_ROOT = resolve(import.meta.dir, "..");
-export const MANIFEST_CLI_PATH = resolve(import.meta.dir, "manifest-cli.ts");
+export function getDashboardEngineRoot(): string {
+  return typeof import.meta.dir === "string" ? resolve(import.meta.dir, "..") : "";
+}
+
+export function getManifestCliPath(): string {
+  return typeof import.meta.dir === "string" ? resolve(import.meta.dir, "manifest-cli.ts") : "";
+}
 
 export function shellEscape(val: string): string {
   if (val === "") return "''";
@@ -501,12 +506,15 @@ export function interpolateActionCommand(params: {
   const maskedTokens: Record<string, string> = {};
   const referencedInTemplate = new Set<string>();
 
+  const engineRoot = getDashboardEngineRoot();
+  const manifestCliPath = getManifestCliPath();
+
   const replaceSandboxTokens = (val: string): string => {
     return val
       .replace(/\{\{\s*skill_dir\s*\}\}/g, skillDir)
       .replace(/\{\{\s*project_root\s*\}\}/g, activeWorkspace)
-      .replace(/\{\{\s*dashboard_root\s*\}\}/g, DASHBOARD_ENGINE_ROOT)
-      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${MANIFEST_CLI_PATH}`)
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, engineRoot)
+      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${manifestCliPath}`)
       .replace(/\{\{\s*data_dir\s*\}\}/g, dataDir)
       .replace(/\{\{\s*cache_dir\s*\}\}/g, cacheDir)
       .replace(/\{\{\s*artifacts_dir\s*\}\}/g, artifactsDir);
@@ -613,8 +621,8 @@ export function interpolateActionCommand(params: {
     let res = raw
       .replace(/\{\{\s*skill_dir\s*\}\}/g, skillDir)
       .replace(/\{\{\s*project_root\s*\}\}/g, baseCwd || activeWorkspace)
-      .replace(/\{\{\s*dashboard_root\s*\}\}/g, DASHBOARD_ENGINE_ROOT)
-      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${MANIFEST_CLI_PATH}`)
+      .replace(/\{\{\s*dashboard_root\s*\}\}/g, engineRoot)
+      .replace(/\{\{\s*manifest_cli\s*\}\}/g, `bun ${manifestCliPath}`)
       .replace(/\{\{\s*data_dir\s*\}\}/g, dataDir)
       .replace(/\{\{\s*cache_dir\s*\}\}/g, cacheDir)
       .replace(/\{\{\s*artifacts_dir\s*\}\}/g, artifactsDir);
@@ -678,12 +686,12 @@ export function interpolateActionCommand(params: {
         escapeForTemplateOffset(str, offset, activeWorkspace)
       )
       .replace(/\{\{\s*dashboard_root\s*\}\}/g, (_m, offset, str) =>
-        escapeForTemplateOffset(str, offset, DASHBOARD_ENGINE_ROOT)
+        escapeForTemplateOffset(str, offset, engineRoot)
       )
       .replace(/\{\{\s*manifest_cli\s*\}\}/g, (_m, offset, str) =>
         isOffsetInsideDoubleQuotes(str, offset)
-          ? `bun ${escapeForTemplateOffset(str, offset, MANIFEST_CLI_PATH)}`
-          : `bun ${shellEscape(MANIFEST_CLI_PATH)}`
+          ? `bun ${escapeForTemplateOffset(str, offset, manifestCliPath)}`
+          : `bun ${shellEscape(manifestCliPath)}`
       )
       .replace(/\{\{\s*data_dir\s*\}\}/g, (_m, offset, str) =>
         dataDir ? escapeForTemplateOffset(str, offset, dataDir) : ""
