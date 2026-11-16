@@ -25,19 +25,25 @@ import {
 } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  buildSkillReactiveArchitecture,
   buildTreeFromArbitraryData,
   computeGraphTopology,
+  doesActionPatternMatch,
   evaluateActionPrecondition,
+  extractImplicitDependencies,
   inferDataPrimitive,
   interpolateBoundTriggerArgs,
   projectRecordsToGraph,
   projectRecordsToList,
   projectRecordsToMatrix,
   projectRecordsToTree,
+  resolveSelfSnapshotPath,
+  type ReactiveArchEdgeKind,
 } from "../interpolator.ts";
 import type {
   ActionGroup,
   ActionItem,
+  BindingFocusScope,
   BoundActionTrigger,
   CanonicalSkill,
   CommandEnvConfig,
@@ -48,6 +54,7 @@ import type {
   DataSnapshot,
   GraphEdgeItem,
   GraphNodeItem,
+  ManifestSymbolProvenance,
   TableColumn,
   TreeNodeItem,
 } from "../types.ts";
@@ -63,6 +70,8 @@ interface StatusProbesBarProps {
   activeWorkspace: string;
   refreshTrigger: number;
   commandEnvOverrides?: Record<string, CommandEnvConfig>;
+  skillProvenance?: ManifestSymbolProvenance;
+  jumpDataNodeRequest?: { nodeId: string; seq: number } | null;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onContextChanged?: (nextContext: Record<string, string | boolean>) => void;
   onSnapshotsChanged?: (snapshots: Record<string, DataSnapshot>) => void;
@@ -72,6 +81,7 @@ interface StatusProbesBarProps {
     adHocCommand?: string;
     adHocTitle?: string;
     formValues?: Record<string, unknown>;
+    focusScope?: BindingFocusScope;
     runner: "web_terminal" | "external_terminal";
     terminalApp?: "Terminal" | "iTerm";
     humanApproved?: boolean;
@@ -80,6 +90,7 @@ interface StatusProbesBarProps {
     actionId: string;
     mode: "run" | "prefill";
     formValues: Record<string, unknown>;
+    focusScope?: BindingFocusScope;
   }) => Promise<void>;
 }
 
@@ -88,8 +99,33 @@ interface ActiveBoundActionAudit {
   triggerKind: "Row Action" | "Bulk Action" | "Quick Action" | "Cell Action" | "Node Action";
   trigger: BoundActionTrigger;
   resolvedArgs: Record<string, unknown>;
+  focusScope: BindingFocusScope;
   scopeSummary?: string;
   seq: number;
+}
+
+export type DataScopeSelection =
+  | { kind: "all" }
+  | { kind: "category"; category: string }
+  | { kind: "subgroup"; category: string; subgroup: string }
+  | { kind: "node"; nodeId: string };
+
+function getNodeCategoryAndSubgroup(node: DataNode): {
+  category: string;
+  subgroup?: string;
+} {
+  const rawCat = (node.category || "Data Nodes").trim();
+  if (node.subgroup && node.subgroup.trim()) {
+    return { category: rawCat || "Data Nodes", subgroup: node.subgroup.trim() };
+  }
+  if (rawCat.includes("/")) {
+    const [c, ...rest] = rawCat.split("/");
+    return {
+      category: (c || "").trim() || "Data Nodes",
+      subgroup: rest.join("/").trim() || undefined,
+    };
+  }
+  return { category: rawCat || "Data Nodes", subgroup: undefined };
 }
 
 function getAvailableViewsForNode(
@@ -283,6 +319,8 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   activeWorkspace,
   refreshTrigger,
   commandEnvOverrides,
+  skillProvenance,
+  jumpDataNodeRequest,
   onSkillUpdated,
   onContextChanged,
   onSnapshotsChanged,
@@ -296,12 +334,13 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const [expandedMap, setExpandedMap] = useState<Record<string, boolean>>({});
   const [tableSearch, setTableSearch] = useState<Record<string, string>>({});
   const [selectedRowKeys, setSelectedRowKeys] = useState<Record<string, Set<string>>>({});
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [dataScope, setDataScope] = useState<DataScopeSelection>({ kind: "all" });
+  const [expandedDataCategories, setExpandedDataCategories] = useState<Set<string>>(new Set());
   const [showIntermediates, setShowIntermediates] = useState<boolean>(false);
   const [openEnvNodeId, setOpenEnvNodeId] = useState<string | null>(null);
   const [inspectNodeId, setInspectNodeId] = useState<string | null>(null);
   const [inspectTabMap, setInspectTabMap] = useState<
-    Record<string, "source" | "actions" | "raw">
+    Record<string, "source" | "lineage" | "views" | "raw">
   >({});
   const [copiedSourceNodeId, setCopiedSourceNodeId] = useState<string | null>(null);
   const [activeAudit, setActiveAudit] = useState<ActiveBoundActionAudit | null>(null);
@@ -310,9 +349,15 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const [collapsedTreeIds, setCollapsedTreeIds] = useState<Record<string, Set<string>>>({});
   const [activeGraphNodeId, setActiveGraphNodeId] = useState<Record<string, string | null>>({});
   const [workbenchLayout, setWorkbenchLayout] = useState<"split" | "accordion" | "grid">("split");
-  const [focusedDataNodeId, setFocusedDataNodeId] = useState<string | null>(null);
+  const [scopeDisplayDensity, setScopeDisplayDensity] = useState<"cards" | "accordion" | "grid">(
+    "cards"
+  );
   const [pinnedNodeIds, setPinnedNodeIds] = useState<string[]>([]);
   const [expandedAccordionIds, setExpandedAccordionIds] = useState<Set<string>>(new Set());
+  const [highlightedDataNodeId, setHighlightedDataNodeId] = useState<string | null>(null);
+  const [archGraphOpen, setArchGraphOpen] = useState<boolean>(false);
+  const [archEdgeFilter, setArchEdgeFilter] = useState<"all" | ReactiveArchEdgeKind>("all");
+  const [selectedArchNodeId, setSelectedArchNodeId] = useState<string | null>(null);
   const skipNextRefreshTriggerRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -348,36 +393,60 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   const intermediateNodes = (dataNodes || []).filter((n) => Boolean(n.intermediate || n.hidden));
   const primaryNodes = (dataNodes || []).filter((n) => !n.intermediate && !n.hidden);
   const activePool = showIntermediates ? (dataNodes || []) : primaryNodes;
-  const categories = [
-    "all",
-    ...Array.from(
-      new Set(activePool.map((n) => n.category).filter((c): c is string => Boolean(c)))
-    ),
-  ];
-  const visibleNodes = activePool.filter(
-    (n) => selectedCategory === "all" || n.category === selectedCategory
-  );
 
-  const scalarNodes = visibleNodes.filter((n) => {
+  const scalarNodes = activePool.filter((n) => {
     const snap = snapshots[n.id];
     const baseShape = (snap?.shape || n.shape || "raw") as DataShape;
     const prim = snap?.primitive || inferDataPrimitive(baseShape, snap?.rawParsed);
     return (prim === "Scalar" || baseShape === "scalar") && !n.intermediate && !n.hidden;
   });
 
-  const workbenchNodes = visibleNodes.filter(
+  const workbenchNodes = activePool.filter(
     (n) => !scalarNodes.some((sn) => sn.id === n.id)
   );
+
+  // Build hierarchical Category -> Subgroup -> DataNode tree for workbenchNodes
+  const dataHierarchyTree = useMemo(() => {
+    const catMap = new Map<
+      string,
+      {
+        category: string;
+        nodes: DataNode[];
+        subgroups: Map<string, DataNode[]>;
+      }
+    >();
+    for (const n of workbenchNodes) {
+      const { category, subgroup } = getNodeCategoryAndSubgroup(n);
+      let entry = catMap.get(category);
+      if (!entry) {
+        entry = { category, nodes: [], subgroups: new Map() };
+        catMap.set(category, entry);
+      }
+      entry.nodes.push(n);
+      if (subgroup) {
+        const sgList = entry.subgroups.get(subgroup) || [];
+        sgList.push(n);
+        entry.subgroups.set(subgroup, sgList);
+      }
+    }
+    return Array.from(catMap.values());
+  }, [workbenchNodes]);
 
   useEffect(() => {
     const nonScalarCount = (dataNodes || []).filter(
       (n) => !n.intermediate && !n.hidden && n.shape !== "scalar"
     ).length;
-    setWorkbenchLayout(nonScalarCount >= 3 ? "split" : "grid");
+    setWorkbenchLayout(nonScalarCount >= 2 ? "split" : "grid");
+    setScopeDisplayDensity("cards");
+    const allCats = new Set<string>();
+    for (const n of dataNodes || []) {
+      allCats.add(getNodeCategoryAndSubgroup(n).category);
+    }
+    setExpandedDataCategories(allCats);
+
     const firstNonScalar = (dataNodes || []).find(
       (n) => !n.intermediate && !n.hidden && n.shape !== "scalar"
     );
-    setFocusedDataNodeId(firstNonScalar?.id || (dataNodes || [])[0]?.id || null);
     // Auto-pin the first master-detail node (with selectContextKey) if another node exists
     const masterNode = (dataNodes || []).find(
       (n) => Boolean(n.selectContextKey) && !n.intermediate && !n.hidden
@@ -391,33 +460,92 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
           n.shape !== "scalar" &&
           n.id !== masterNode.id
       );
-      if (firstDownstream) {
-        setFocusedDataNodeId(firstDownstream.id);
-      }
+      setDataScope(
+        firstDownstream
+          ? { kind: "node", nodeId: firstDownstream.id }
+          : { kind: "all" }
+      );
     } else {
       setPinnedNodeIds([]);
+      setDataScope({ kind: "all" });
     }
     setExpandedAccordionIds(
       new Set(firstNonScalar ? [firstNonScalar.id] : [])
     );
   }, [skillId]);
 
-  useEffect(() => {
-    if (
-      workbenchNodes.length > 0 &&
-      (!focusedDataNodeId || !workbenchNodes.some((n) => n.id === focusedDataNodeId))
-    ) {
-      const candidate =
-        workbenchNodes.find((n) => !pinnedNodeIds.includes(n.id)) || workbenchNodes[0];
-      if (candidate) setFocusedDataNodeId(candidate.id);
+  const jumpToDataNodeCard = (targetNodeId: string) => {
+    const targetNode = (dataNodes || []).find((n) => n.id === targetNodeId);
+    if (!targetNode) return;
+    if (targetNode.intermediate || targetNode.hidden) {
+      setShowIntermediates(true);
     }
-  }, [selectedCategory, showIntermediates, workbenchNodes.length]);
+    if (targetNode.shape !== "scalar") {
+      setDataScope({ kind: "node", nodeId: targetNodeId });
+      setExpandedAccordionIds((prev) => new Set([...prev, targetNodeId]));
+    }
+    setHighlightedDataNodeId(targetNodeId);
+    setTimeout(() => {
+      if (typeof document !== "undefined") {
+        const el = document.querySelector(
+          `[data-sd-pick-kind="data-node"][data-sd-pick-id="${targetNodeId}"]`
+        );
+        if (el && "scrollIntoView" in el) {
+          (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+    }, 80);
+    setTimeout(() => setHighlightedDataNodeId(null), 2400);
+  };
+
+  useEffect(() => {
+    if (!jumpDataNodeRequest) return;
+    jumpToDataNodeCard(jumpDataNodeRequest.nodeId);
+  }, [jumpDataNodeRequest?.seq]);
 
   const togglePinNode = (nodeId: string) => {
     setPinnedNodeIds((prev) =>
       prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId]
     );
   };
+
+  const reactiveArchGraph = useMemo(() => {
+    return buildSkillReactiveArchitecture(
+      {
+        context: contextFields || [],
+        data: dataNodes || [],
+        actionGroups: actionGroups || [],
+      },
+      snapshots,
+      skillProvenance
+    );
+  }, [contextFields, dataNodes, actionGroups, snapshots, skillProvenance]);
+
+  const scopedWorkbenchNodes = useMemo(() => {
+    if (dataScope.kind === "all") return workbenchNodes;
+    if (dataScope.kind === "category") {
+      return workbenchNodes.filter(
+        (n) => getNodeCategoryAndSubgroup(n).category === dataScope.category
+      );
+    }
+    if (dataScope.kind === "subgroup") {
+      return workbenchNodes.filter((n) => {
+        const parsed = getNodeCategoryAndSubgroup(n);
+        return parsed.category === dataScope.category && parsed.subgroup === dataScope.subgroup;
+      });
+    }
+    return workbenchNodes.filter((n) => n.id === dataScope.nodeId);
+  }, [workbenchNodes, dataScope]);
+
+  const scopeBreadcrumbText = useMemo(() => {
+    if (dataScope.kind === "all") return `All Data Nodes (${workbenchNodes.length})`;
+    if (dataScope.kind === "category")
+      return `📁 ${dataScope.category} (${scopedWorkbenchNodes.length})`;
+    if (dataScope.kind === "subgroup")
+      return `📁 ${dataScope.category} / 📂 ${dataScope.subgroup} (${scopedWorkbenchNodes.length})`;
+    const target = workbenchNodes.find((n) => n.id === dataScope.nodeId);
+    return target ? `📄 ${target.title}` : `📄 ${dataScope.nodeId}`;
+  }, [dataScope, workbenchNodes, scopedWorkbenchNodes]);
 
   const isAnyLoading = Object.values(loadingMap).some(Boolean);
 
@@ -568,7 +696,6 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
   };
 
   useEffect(() => {
-    setSelectedCategory("all");
     setSnapshots({});
     setSelectedRowKeys({});
     setViewModeOverride({});
@@ -578,6 +705,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     setOpenEnvNodeId(null);
     setInspectNodeId(null);
     setActiveAudit(null);
+    setSelectedArchNodeId(null);
     loadAll(false);
   }, [skillId, activeWorkspace]);
 
@@ -634,8 +762,15 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       scopeSummary?: string;
     }
   ) => {
+    const focusScope: BindingFocusScope = {
+      hostNodeId: node.id,
+      row: scope.row,
+      selectedRows: scope.selectedRows,
+      cell: scope.cell,
+      node: scope.node,
+    };
     const resolvedArgs = interpolateBoundTriggerArgs(trigger.args, {
-      ...scope,
+      ...focusScope,
       contextValues: contextState,
       dataSnapshots: snapshots,
     });
@@ -644,6 +779,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       triggerKind,
       trigger,
       resolvedArgs,
+      focusScope,
       scopeSummary: scope.scopeSummary,
       seq: Date.now(),
     });
@@ -669,15 +805,24 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
       scopeSummary?: string;
     }
   ) => {
-    const targetInfo = actionsMap.get(trigger.actionId);
+    const actionId = trigger.actionId || "";
+    const targetInfo = actionsMap.get(actionId);
     const targetAction = targetInfo?.action;
     if (!targetAction) {
       triggerBound(node, triggerKind, trigger, scope);
       return;
     }
 
+    const focusScope: BindingFocusScope = {
+      hostNodeId: node.id,
+      row: scope.row,
+      selectedRows: scope.selectedRows,
+      cell: scope.cell,
+      node: scope.node,
+    };
+
     const resolvedArgs = interpolateBoundTriggerArgs(trigger.args, {
-      ...scope,
+      ...focusScope,
       contextValues: contextState,
       dataSnapshots: snapshots,
     });
@@ -718,9 +863,10 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
     }
 
     void onExecuteBoundTrigger({
-      actionId: trigger.actionId,
+      actionId,
       mode: "run",
       formValues: mergedFormValues,
+      focusScope,
     });
   };
 
@@ -975,67 +1121,79 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         </div>
       )}
 
-      {/* 2. Data Panel Control Bar (Categories + Intermediates Switch + Refresh Data) */}
+      {/* 2. Data Panel Control Bar (Scope Breadcrumb + Architecture Graph + Density Switcher + Intermediates + Refresh) */}
       {(dataNodes || []).length > 0 && (
         <div className="st-card rounded-2xl px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
-          {/* Left Side: Database Icon + Title + Category Filter Pills */}
+          {/* Left Side: Database Icon + Title + Active Scope Breadcrumb & Scope Refresh */}
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-2 text-xs font-bold st-text-primary">
               <Database className="w-4 h-4 text-sky-500" />
-              <span>Reactive Data Graph</span>
+              <span>Reactive Data Workbench</span>
             </div>
 
-            {categories.length > 1 && (
+            {workbenchNodes.length > 0 && (
               <div className="flex items-center gap-1.5 flex-wrap">
-                {categories.map((cat) => {
-                  const isAll = cat === "all";
-                  const count = isAll
-                    ? activePool.length
-                    : activePool.filter((n) => n.category === cat).length;
-                  const active = selectedCategory === cat;
-                  return (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setSelectedCategory(cat)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                        active
-                          ? "bg-sky-600 text-white shadow-sm"
-                          : "st-btn-secondary hover:st-text-primary"
-                      }`}
-                    >
-                      {isAll ? `All (${count})` : `${cat} (${count})`}
-                    </button>
-                  );
-                })}
+                <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-semibold st-subcard border st-border st-text-primary">
+                  {scopeBreadcrumbText}
+                </span>
+                {dataScope.kind !== "all" && (
+                  <button
+                    type="button"
+                    onClick={() => setDataScope({ kind: "all" })}
+                    className="px-2 py-1 rounded-lg text-[11px] font-semibold st-btn-secondary"
+                    title="Reset scope to show all data nodes"
+                  >
+                    Show All
+                  </button>
+                )}
               </div>
             )}
           </div>
 
-          {/* Right Side: Workbench Layout Switcher + Intermediates Toggle + Refresh Data Button */}
+          {/* Right Side: Architecture Graph Toggle + Workbench Layout Switcher + Intermediates Toggle + Refresh */}
           <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setArchGraphOpen((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold transition-all border ${
+                archGraphOpen
+                  ? "bg-indigo-500/15 border-indigo-500/50 text-indigo-700 dark:text-indigo-300 shadow-sm"
+                  : "st-btn-secondary border-transparent"
+              }`}
+              title="Toggle 4-Swimlane Reactive Architecture Graph (Context ➔ Data ⇌ Actions)"
+            >
+              <GitBranch className="w-3.5 h-3.5 text-indigo-500" />
+              <span>🕸️ Data ⇌ Action Graph ({reactiveArchGraph.edges.length})</span>
+            </button>
+
             {workbenchNodes.length > 0 && (
               <div
                 className="inline-flex items-center rounded-xl p-0.5 st-subcard border st-border"
-                title="Switch Data Workbench Layout (Split Focus Navigator / Accordion / Grid)"
+                title="Switch Right-Canvas Scope Display Density (Cards / Accordion / 2-Col Grid)"
               >
                 <button
                   type="button"
-                  onClick={() => setWorkbenchLayout("split")}
+                  onClick={() => {
+                    if (workbenchNodes.length >= 2) setWorkbenchLayout("split");
+                    setScopeDisplayDensity("cards");
+                  }}
                   className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    workbenchLayout === "split"
+                    scopeDisplayDensity === "cards"
                       ? "bg-sky-600 text-white shadow-sm"
                       : "st-text-secondary hover:st-text-primary"
                   }`}
                 >
                   <Columns className="w-3.5 h-3.5" />
-                  <span>Focus</span>
+                  <span>Cards</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setWorkbenchLayout("accordion")}
+                  onClick={() => {
+                    if (workbenchNodes.length >= 2) setWorkbenchLayout("split");
+                    setScopeDisplayDensity("accordion");
+                  }}
                   className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    workbenchLayout === "accordion"
+                    scopeDisplayDensity === "accordion"
                       ? "bg-sky-600 text-white shadow-sm"
                       : "st-text-secondary hover:st-text-primary"
                   }`}
@@ -1045,9 +1203,12 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setWorkbenchLayout("grid")}
+                  onClick={() => {
+                    if (workbenchNodes.length >= 2) setWorkbenchLayout("split");
+                    setScopeDisplayDensity("grid");
+                  }}
                   className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                    workbenchLayout === "grid"
+                    scopeDisplayDensity === "grid"
                       ? "bg-sky-600 text-white shadow-sm"
                       : "st-text-secondary hover:st-text-primary"
                   }`}
@@ -1082,6 +1243,21 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
               </button>
             )}
 
+            {dataScope.kind !== "all" && scopedWorkbenchNodes.length > 0 && (
+              <button
+                type="button"
+                onClick={() => loadAll(true, scopedWorkbenchNodes)}
+                disabled={isAnyLoading}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl st-btn-secondary text-xs font-semibold transition-all"
+                title="Refresh only the DataNodes in the currently selected scope"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${isAnyLoading ? "animate-spin text-sky-500" : ""}`}
+                />
+                <span>↻ Refresh Scope ({scopedWorkbenchNodes.length})</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => loadAll(true)}
@@ -1090,11 +1266,351 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
               title="Refresh all live data nodes"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isAnyLoading ? "animate-spin text-sky-500" : ""}`} />
-              <span>↻ Refresh Data</span>
+              <span>↻ Refresh All</span>
             </button>
           </div>
         </div>
       )}
+
+      {/* 2a. Zero-Config Interactive 4-Swimlane Architecture Graph (Context ➔ Data ⇌ Actions) */}
+      {archGraphOpen &&
+        (() => {
+          const allArchNodes = reactiveArchGraph.nodes;
+          const filteredArchEdges = reactiveArchGraph.edges.filter(
+            (e) => archEdgeFilter === "all" || e.kind === archEdgeFilter
+          );
+          const connectedNodeIds = new Set<string>();
+          for (const e of filteredArchEdges) {
+            connectedNodeIds.add(e.source);
+            connectedNodeIds.add(e.target);
+          }
+          const visibleArchNodes = allArchNodes.filter(
+            (n) =>
+              n.symbolKind !== "action" ||
+              connectedNodeIds.has(n.id) ||
+              allArchNodes.filter((x) => x.symbolKind === "action").length <= 6
+          );
+
+          const layersMap = new Map<number, typeof visibleArchNodes>();
+          for (const n of visibleArchNodes) {
+            const l = n.layer ?? 0;
+            const list = layersMap.get(l) || [];
+            list.push(n);
+            layersMap.set(l, list);
+          }
+
+          const COL_W = 215;
+          const ROW_H = 68;
+          const COL_GAP = 78;
+          const ROW_GAP = 16;
+          const PAD_X = 20;
+          const PAD_Y = 38;
+
+          const coords = new Map<string, { x: number; y: number; layer: number }>();
+          let maxRows = 1;
+          for (const l of [0, 1, 2, 3]) {
+            const col = layersMap.get(l) || [];
+            if (col.length > maxRows) maxRows = col.length;
+            col.forEach((n, rIdx) => {
+              coords.set(n.id, {
+                x: PAD_X + l * (COL_W + COL_GAP),
+                y: PAD_Y + rIdx * (ROW_H + ROW_GAP),
+                layer: l,
+              });
+            });
+          }
+
+          const canvasW = Math.max(820, PAD_X * 2 + 4 * COL_W + 3 * COL_GAP);
+          const canvasH = Math.max(240, PAD_Y + maxRows * (ROW_H + ROW_GAP) + 36);
+
+          const selectedArchNode =
+            visibleArchNodes.find((n) => n.id === selectedArchNodeId) || null;
+          const upSet = new Set(selectedArchNode?.upstreamIds || []);
+          const downSet = new Set(selectedArchNode?.downstreamIds || []);
+
+          const swimlaneTitles: Array<{ layer: number; title: string; color: string }> = [
+            { layer: 0, title: "0 · Context Inputs", color: "text-indigo-500" },
+            { layer: 1, title: "1 · Source / Intermediate Data", color: "text-amber-500" },
+            { layer: 2, title: "2 · View DataNodes", color: "text-emerald-500" },
+            { layer: 3, title: "3 · Bound & Multi-Source Actions", color: "text-sky-500" },
+          ];
+
+          return (
+            <div className="st-card rounded-2xl p-4 flex flex-col gap-3 border border-indigo-500/30">
+              <div className="flex items-center justify-between gap-3 flex-wrap border-b st-border pb-2.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <GitBranch className="w-4 h-4 text-indigo-500" />
+                  <span className="text-xs font-bold st-text-primary">
+                    Reactive Architecture Topology (Context ➔ Data ⇌ Actions)
+                  </span>
+                  <span className="text-[11px] st-text-muted">
+                    Click any node to highlight its upstream/downstream blast radius; solid lines = forward flow, dashed arcs = feedback/refresh loops.
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {(
+                    [
+                      { id: "all", label: `All Edges (${reactiveArchGraph.edges.length})` },
+                      { id: "data_dag", label: "Data DAG" },
+                      { id: "trigger", label: "Action Triggers" },
+                      { id: "multi_source_read", label: "Multi-Source Reads" },
+                      { id: "feedback", label: "Feedback / Refresh Loops" },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setArchEdgeFilter(f.id)}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] font-semibold transition-colors ${
+                        archEdgeFilter === f.id
+                          ? "bg-indigo-600 text-white"
+                          : "st-btn-secondary"
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                  {selectedArchNode && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedArchNodeId(null)}
+                      className="px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-rose-500/15 text-rose-600 dark:text-rose-300"
+                    >
+                      Clear Focus ×
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setArchGraphOpen(false)}
+                    className="p-1 rounded-lg st-btn-secondary"
+                    title="Close Architecture Graph"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-xl border st-border st-code-surface overflow-x-auto overflow-y-auto max-h-[520px]">
+                <div
+                  className="relative select-none"
+                  style={{ width: `${canvasW}px`, height: `${canvasH}px` }}
+                >
+                  {/* Swimlane Column Headers */}
+                  {swimlaneTitles.map((sw) => (
+                    <div
+                      key={sw.layer}
+                      style={{
+                        left: `${PAD_X + sw.layer * (COL_W + COL_GAP)}px`,
+                        top: `8px`,
+                        width: `${COL_W}px`,
+                      }}
+                      className={`absolute text-[10.5px] font-mono font-bold uppercase tracking-wider ${sw.color}`}
+                    >
+                      {sw.title}
+                    </div>
+                  ))}
+
+                  <svg
+                    width={canvasW}
+                    height={canvasH}
+                    className="absolute inset-0 pointer-events-none"
+                  >
+                    <defs>
+                      <marker
+                        id="arch-arrow-forward"
+                        viewBox="0 0 10 10"
+                        refX="8"
+                        refY="5"
+                        markerWidth="6"
+                        markerHeight="6"
+                        orient="auto-start-reverse"
+                      >
+                        <path d="M 0 1 L 10 5 L 0 9 z" fill="#0ea5e9" />
+                      </marker>
+                      <marker
+                        id="arch-arrow-feedback"
+                        viewBox="0 0 10 10"
+                        refX="8"
+                        refY="5"
+                        markerWidth="6"
+                        markerHeight="6"
+                        orient="auto-start-reverse"
+                      >
+                        <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" />
+                      </marker>
+                    </defs>
+
+                    {filteredArchEdges.map((edge, idx) => {
+                      const srcPos = coords.get(edge.source);
+                      const tgtPos = coords.get(edge.target);
+                      if (!srcPos || !tgtPos) return null;
+
+                      const isFeedback = Boolean(edge.isFeedback || srcPos.layer >= tgtPos.layer);
+                      let pathD: string;
+                      let labelX: number;
+                      let labelY: number;
+
+                      if (!isFeedback) {
+                        const x1 = srcPos.x + COL_W;
+                        const y1 = srcPos.y + ROW_H / 2;
+                        const x2 = tgtPos.x;
+                        const y2 = tgtPos.y + ROW_H / 2;
+                        const dx = Math.max(36, Math.abs(x2 - x1) * 0.45);
+                        pathD = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+                        labelX = (x1 + x2) / 2;
+                        labelY = (y1 + y2) / 2 - 5;
+                      } else {
+                        // Feedback loop arc routing underneath cards back to target
+                        const x1 = srcPos.x + COL_W / 2;
+                        const y1 = srcPos.y + ROW_H;
+                        const x2 = tgtPos.x + COL_W / 2;
+                        const y2 = tgtPos.y + ROW_H;
+                        const arcY = Math.max(y1, y2) + 34 + (idx % 3) * 10;
+                        pathD = `M ${x1} ${y1} C ${x1} ${arcY}, ${x2} ${arcY}, ${x2} ${y2}`;
+                        labelX = (x1 + x2) / 2;
+                        labelY = arcY - 4;
+                      }
+
+                      const isHighlighted =
+                        !selectedArchNode ||
+                        edge.source === selectedArchNode.id ||
+                        edge.target === selectedArchNode.id ||
+                        (upSet.has(edge.source) && upSet.has(edge.target)) ||
+                        (downSet.has(edge.source) && downSet.has(edge.target));
+
+                      return (
+                        <g
+                          key={`${edge.source}->${edge.target}:${idx}`}
+                          opacity={isHighlighted ? 0.95 : 0.18}
+                        >
+                          <path
+                            d={pathD}
+                            fill="none"
+                            stroke={isFeedback ? "#f59e0b" : "#0ea5e9"}
+                            strokeWidth={selectedArchNode && isHighlighted ? 2.2 : 1.5}
+                            strokeDasharray={isFeedback ? "5 4" : undefined}
+                            markerEnd={
+                              isFeedback
+                                ? "url(#arch-arrow-feedback)"
+                                : "url(#arch-arrow-forward)"
+                            }
+                          />
+                          {edge.label && (
+                            <text
+                              x={labelX}
+                              y={labelY}
+                              textAnchor="middle"
+                              className={`text-[9.5px] font-mono ${
+                                isFeedback
+                                  ? "fill-amber-600 dark:fill-amber-400"
+                                  : "fill-sky-600 dark:fill-sky-400"
+                              }`}
+                            >
+                              {edge.label}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
+                  </svg>
+
+                  {visibleArchNodes.map((an) => {
+                    const pos = coords.get(an.id);
+                    if (!pos) return null;
+                    const isSelected = selectedArchNode?.id === an.id;
+                    const isUp = upSet.has(an.id);
+                    const isDown = downSet.has(an.id);
+                    const isDimmed =
+                      Boolean(selectedArchNode) && !isSelected && !isUp && !isDown;
+
+                    return (
+                      <div
+                        key={an.id}
+                        onClick={() =>
+                          setSelectedArchNodeId((prev) => (prev === an.id ? null : an.id))
+                        }
+                        style={{
+                          left: `${pos.x}px`,
+                          top: `${pos.y}px`,
+                          width: `${COL_W}px`,
+                          height: `${ROW_H}px`,
+                        }}
+                        className={`absolute rounded-xl p-2.5 border flex flex-col justify-between cursor-pointer transition-all st-card ${
+                          isSelected
+                            ? "border-indigo-500 ring-2 ring-indigo-500/40 shadow-lg"
+                            : isUp
+                              ? "border-amber-500/70 bg-amber-500/5"
+                              : isDown
+                                ? "border-emerald-500/70 bg-emerald-500/5"
+                                : an.intermediate
+                                  ? "border-dashed border-amber-500/40"
+                                  : "st-border hover:border-indigo-500/50"
+                        } ${isDimmed ? "opacity-30" : "opacity-100"}`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase st-pill truncate">
+                            {an.group}
+                          </span>
+                          <span className="text-[9.5px] font-mono st-text-muted shrink-0">
+                            ↑{an.upstreamIds?.length || 0} · ↓{an.downstreamIds?.length || 0}
+                          </span>
+                        </div>
+                        <div className="font-mono text-xs font-bold st-text-primary truncate">
+                          {an.label}
+                        </div>
+                        <div className="text-[10px] font-mono st-text-secondary truncate">
+                          {an.meta}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {selectedArchNode && (
+                <div className="px-3.5 py-2.5 rounded-xl st-subcard border st-border flex items-center justify-between gap-3 flex-wrap text-xs">
+                  <div className="flex items-center gap-2 flex-wrap font-mono">
+                    <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-bold">
+                      {selectedArchNode.group}: {selectedArchNode.label} ({selectedArchNode.rawId})
+                    </span>
+                    {selectedArchNode.definedIn && (
+                      <span className="px-2 py-0.5 rounded st-pill">
+                        source: {selectedArchNode.definedIn}
+                      </span>
+                    )}
+                    <span className="st-text-secondary">
+                      Upstream: {selectedArchNode.upstreamIds?.length || 0} · Downstream:{" "}
+                      {selectedArchNode.downstreamIds?.length || 0}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {selectedArchNode.symbolKind === "data" && (
+                      <button
+                        type="button"
+                        onClick={() => jumpToDataNodeCard(selectedArchNode.rawId)}
+                        className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+                      >
+                        ↗ Jump to DataNode Card
+                      </button>
+                    )}
+                    {selectedArchNode.symbolKind === "action" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onLocateActionInPlayground?.(selectedArchNode.rawId, {})
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+                      >
+                        ↗ Jump to Action Card
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
       {/* 2b. Top Compact Scalar KPI Strip */}
       {scalarNodes.length > 0 && (
@@ -1191,7 +1707,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
             const shape = (viewModeOverride[node.id] || baseShape) as DataShape;
             const projectedValue = projectSnapshotToView(node, snap, shape);
             const isFullSpan =
-              workbenchLayout !== "grid" ||
+              scopeDisplayDensity !== "grid" ||
               shape === "table" ||
               shape === "matrix" ||
               shape === "graph" ||
@@ -1227,7 +1743,11 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                 className={`st-card rounded-2xl p-4 flex flex-col gap-3 transition-all ${
                   isFullSpan ? "xl:col-span-2" : ""
                 } ${isIntermediate ? "border-dashed border-amber-500/40" : ""} ${
-                  isPinned && workbenchLayout === "split" ? "ring-1 ring-sky-500/40" : ""
+                  highlightedDataNodeId === node.id
+                    ? "ring-2 ring-sky-500 border-sky-500 shadow-lg"
+                    : isPinned && workbenchLayout === "split"
+                      ? "ring-1 ring-sky-500/40"
+                      : ""
                 }`}
               >
                 {/* Header */}
@@ -1402,12 +1922,17 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                   </div>
                 </div>
 
-                {/* White-Box DataNode Inspector Panel (Source / Bound Actions / Raw & DAG) */}
+                {/* White-Box 4-Tab DataNode Inspector Panel (Source & Provenance / DAG Lineage & Action Bindings / Views & Payload / Raw Declaration) */}
                 {inspectNodeId === node.id &&
                   (() => {
                     const activeInspectTab = inspectTabMap[node.id] || "source";
-                    const setInspectTab = (tab: "source" | "actions" | "raw") =>
-                      setInspectTabMap((prev) => ({ ...prev, [node.id]: tab }));
+                    const setInspectTab = (
+                      tab: "source" | "lineage" | "views" | "raw"
+                    ) => setInspectTabMap((prev) => ({ ...prev, [node.id]: tab }));
+
+                    const nodeProvenance =
+                      skillProvenance?.dataSource?.[node.id] || "manifest.yaml";
+
                     const nodeTriggers: Array<{
                       kind: ActiveBoundActionAudit["triggerKind"];
                       trigger: BoundActionTrigger;
@@ -1432,6 +1957,7 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                         ? [{ kind: "Cell Action" as const, trigger: node.cellAction }]
                         : []),
                     ];
+
                     const rawYamlSource =
                       node.script ||
                       node.command ||
@@ -1449,6 +1975,115 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                             (node.columns || []).map((c) => [c.key, `<${c.key}>`])
                           );
 
+                    // Compute complete DAG Lineage & Action Bindings for this DataNode
+                    const nodeTextDeps = extractImplicitDependencies(
+                      [
+                        node.command || "",
+                        node.script || "",
+                        node.code || "",
+                        node.sql || "",
+                        node.transform?.code || "",
+                      ].join("\n")
+                    );
+                    const upstreamContextKeys = Array.from(
+                      new Set([
+                        ...nodeTextDeps.contextKeys,
+                        ...(node.sync?.dependsOn || [])
+                          .filter((d) => d.startsWith("context."))
+                          .map((d) => d.slice("context.".length)),
+                      ])
+                    );
+                    const upstreamDataNodeIds = Array.from(
+                      new Set([
+                        ...nodeTextDeps.dataNodeIds.filter((d) => d !== node.id),
+                        ...(node.sync?.dependsOn || []).filter((d) => !d.startsWith("context.")),
+                      ])
+                    );
+                    const downstreamDataNodeIds = (dataNodes || [])
+                      .filter((dn) => {
+                        if (dn.id === node.id) return false;
+                        if (dn.sync?.dependsOn?.includes(node.id)) return true;
+                        const imp = extractImplicitDependencies(
+                          [
+                            dn.command || "",
+                            dn.script || "",
+                            dn.code || "",
+                            dn.sql || "",
+                            dn.transform?.code || "",
+                          ].join("\n")
+                        );
+                        return imp.dataNodeIds.includes(node.id);
+                      })
+                      .map((dn) => dn.id);
+
+                    const inboundActionConsumers: Array<{
+                      actionId: string;
+                      title: string;
+                      reason: string;
+                    }> = [];
+                    const writerRefreshActions: Array<{
+                      actionId: string;
+                      title: string;
+                      mode: "intoData" | "refreshData" | "refreshAfterActions";
+                    }> = [];
+
+                    const refreshPatterns = [
+                      ...(node.sync?.refreshAfterActions || []),
+                      ...(node.sync?.invalidateOnActions || []),
+                    ];
+
+                    for (const [actId, info] of actionsMap.entries()) {
+                      const act = info.action;
+                      const reasons: string[] = [];
+                      for (const f of act.form || []) {
+                        if (f.fromData === node.id) reasons.push(`fromData (${f.key})`);
+                      }
+                      for (const pre of act.preconditions || []) {
+                        if (pre.dataNodeId === node.id) reasons.push(`precondition`);
+                      }
+                      const actImp = extractImplicitDependencies(act.script || act.command || "");
+                      if (actImp.dataNodeIds.includes(node.id)) {
+                        reasons.push(`{{data.${node.id}}}`);
+                      }
+                      if (reasons.length > 0) {
+                        inboundActionConsumers.push({
+                          actionId: actId,
+                          title: act.title,
+                          reason: reasons.join(" + "),
+                        });
+                      }
+
+                      if (act.output?.intoData === node.id) {
+                        writerRefreshActions.push({
+                          actionId: actId,
+                          title: act.title,
+                          mode: "intoData",
+                        });
+                      } else if (act.output?.refreshData?.includes(node.id)) {
+                        writerRefreshActions.push({
+                          actionId: actId,
+                          title: act.title,
+                          mode: "refreshData",
+                        });
+                      } else if (
+                        refreshPatterns.some((pat) => doesActionPatternMatch(pat, actId))
+                      ) {
+                        writerRefreshActions.push({
+                          actionId: actId,
+                          title: act.title,
+                          mode: "refreshAfterActions",
+                        });
+                      }
+                    }
+
+                    const totalLineageCount =
+                      upstreamContextKeys.length +
+                      upstreamDataNodeIds.length +
+                      downstreamDataNodeIds.length +
+                      nodeTriggers.length +
+                      inboundActionConsumers.length +
+                      writerRefreshActions.length;
+
                     return (
                       <div className="st-subcard rounded-xl border border-sky-500/30 p-3.5 flex flex-col gap-3 text-xs">
                         <div className="flex items-center justify-between gap-2 flex-wrap border-b st-border pb-2">
@@ -1463,19 +2098,31 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                               }`}
                             >
                               <Code2 className="w-3.5 h-3.5" />
-                              <span>Execution Source</span>
+                              <span>Source & Provenance</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => setInspectTab("actions")}
+                              onClick={() => setInspectTab("lineage")}
                               className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
-                                activeInspectTab === "actions"
+                                activeInspectTab === "lineage"
                                   ? "bg-sky-600 text-white"
                                   : "st-btn-secondary"
                               }`}
                             >
-                              <Play className="w-3 h-3" />
-                              <span>Bound Actions ({nodeTriggers.length})</span>
+                              <GitBranch className="w-3.5 h-3.5" />
+                              <span>DAG Lineage & Action Bindings ({totalLineageCount})</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setInspectTab("views")}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold transition-colors ${
+                                activeInspectTab === "views"
+                                  ? "bg-sky-600 text-white"
+                                  : "st-btn-secondary"
+                              }`}
+                            >
+                              <Database className="w-3.5 h-3.5" />
+                              <span>Views & Payload</span>
                             </button>
                             <button
                               type="button"
@@ -1486,8 +2133,8 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                   : "st-btn-secondary"
                               }`}
                             >
-                              <Database className="w-3.5 h-3.5" />
-                              <span>Raw Output & DAG</span>
+                              <Terminal className="w-3.5 h-3.5" />
+                              <span>Raw Declaration</span>
                             </button>
                           </div>
 
@@ -1508,14 +2155,15 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 <span className="px-2 py-0.5 rounded st-pill">
                                   id: {node.id}
                                 </span>
+                                <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30">
+                                  source: {nodeProvenance}
+                                </span>
                                 <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
-                                  primitive: {primitive}
+                                  {primitive} ➔ {shape.toUpperCase()}
                                 </span>
                                 <span className="px-2 py-0.5 rounded st-pill">
                                   runtime: {node.runtime || "zsh"}
-                                </span>
-                                <span className="px-2 py-0.5 rounded st-pill">
-                                  shape: {shape} (base: {baseShape})
+                                  {node.prelude ? " (prelude: true)" : ""}
                                 </span>
                                 {node.parse?.format && (
                                   <span className="px-2 py-0.5 rounded st-pill">
@@ -1525,6 +2173,11 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 <span className="px-2 py-0.5 rounded st-pill">
                                   cwd: {envSummary?.cwd || node.cwd || activeWorkspace}
                                 </span>
+                                {refreshPatterns.length > 0 && (
+                                  <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                                    refreshAfterActions: {refreshPatterns.join(", ")}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5 flex-wrap">
@@ -1619,135 +2272,275 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                           </div>
                         )}
 
-                        {activeInspectTab === "actions" && (
-                          <div className="flex flex-col gap-2">
-                            {nodeTriggers.length === 0 ? (
-                              <div className="p-3 rounded-lg st-code-surface border st-border st-text-muted text-center">
-                                No bound actions (`rowActions`, `bulkActions`, `quickActions`, or `cellAction`) configured on this DataNode.
+                        {activeInspectTab === "lineage" && (
+                          <div className="flex flex-col gap-3">
+                            {/* 1. Upstream & Downstream DAG Grid */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 font-mono text-[11px]">
+                              <div className="p-2.5 rounded-lg st-code-surface border st-border flex flex-col gap-1.5">
+                                <span className="st-text-muted text-[10px] font-sans font-bold uppercase">
+                                  ⬅️ Upstream Data & Context
+                                </span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {upstreamContextKeys.map((ck) => (
+                                    <span
+                                      key={`ctx:${ck}`}
+                                      className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                                    >
+                                      context.{ck}
+                                    </span>
+                                  ))}
+                                  {upstreamDataNodeIds.map((upId) => (
+                                    <button
+                                      key={upId}
+                                      type="button"
+                                      onClick={() => jumpToDataNodeCard(upId)}
+                                      className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 hover:bg-sky-500/25 font-semibold"
+                                      title="Jump to upstream DataNode"
+                                    >
+                                      data:{upId} ↗
+                                    </button>
+                                  ))}
+                                  {upstreamContextKeys.length === 0 &&
+                                    upstreamDataNodeIds.length === 0 && (
+                                      <span className="st-text-muted italic">None (Root Node)</span>
+                                    )}
+                                </div>
                               </div>
-                            ) : (
-                              <div className="rounded-xl border st-border overflow-x-auto">
-                                <table className="w-full text-left border-collapse text-xs">
-                                  <thead>
-                                    <tr className="border-b st-border st-surface-muted text-[11px] font-bold st-text-secondary uppercase">
-                                      <th className="py-2 px-2.5">Trigger Type</th>
-                                      <th className="py-2 px-2.5">Button Label</th>
-                                      <th className="py-2 px-2.5">Target Action</th>
-                                      <th className="py-2 px-2.5">Mode</th>
-                                      <th className="py-2 px-2.5">Args Template</th>
-                                      <th className="py-2 px-2.5 text-right">Audit</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y st-border">
-                                    {nodeTriggers.map(({ kind, trigger }, tIdx) => {
-                                      const info = actionsMap.get(trigger.actionId);
-                                      return (
-                                        <tr key={tIdx} className="hover:st-surface-muted">
-                                          <td className="py-2 px-2.5 font-mono text-[11px] st-text-secondary">
-                                            {kind}
-                                          </td>
-                                          <td className="py-2 px-2.5 font-semibold st-text-primary">
-                                            {trigger.label}
-                                          </td>
-                                          <td className="py-2 px-2.5">
-                                            {info ? (
-                                              <div className="flex flex-col gap-0.5">
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                  <code className="font-mono font-bold text-sky-600 dark:text-sky-400">
-                                                    {trigger.actionId}
-                                                  </code>
-                                                  <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold">
-                                                    Found
-                                                  </span>
-                                                  {info.action.danger !== "safe" && (
-                                                    <span className="px-1.5 py-0.2 rounded text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-300 font-semibold">
-                                                      {info.action.danger}
+
+                              <div className="p-2.5 rounded-lg st-code-surface border st-border flex flex-col gap-1.5">
+                                <span className="st-text-muted text-[10px] font-sans font-bold uppercase">
+                                  ➡️ Downstream Data & Context
+                                </span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {selectContextKey && (
+                                    <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
+                                      sets context.{selectContextKey}
+                                    </span>
+                                  )}
+                                  {downstreamDataNodeIds.map((dnId) => (
+                                    <button
+                                      key={dnId}
+                                      type="button"
+                                      onClick={() => jumpToDataNodeCard(dnId)}
+                                      className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/25 font-semibold"
+                                      title="Jump to downstream DataNode"
+                                    >
+                                      data:{dnId} ↗
+                                    </button>
+                                  ))}
+                                  {!selectContextKey && downstreamDataNodeIds.length === 0 && (
+                                    <span className="st-text-muted italic">None</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="p-2.5 rounded-lg st-code-surface border st-border flex flex-col gap-1.5">
+                                <span className="st-text-muted text-[10px] font-sans font-bold uppercase">
+                                  📥 Consumed By Actions
+                                </span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {inboundActionConsumers.map((c) => (
+                                    <button
+                                      key={c.actionId}
+                                      type="button"
+                                      onClick={() => onLocateActionInPlayground?.(c.actionId, {})}
+                                      className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 hover:bg-sky-500/25 font-semibold"
+                                      title={`${c.title} (${c.reason}) — Click to jump to ActionCard`}
+                                    >
+                                      action:{c.actionId} ({c.reason}) ↗
+                                    </button>
+                                  ))}
+                                  {inboundActionConsumers.length === 0 && (
+                                    <span className="st-text-muted italic">None</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="p-2.5 rounded-lg st-code-surface border st-border flex flex-col gap-1.5">
+                                <span className="st-text-muted text-[10px] font-sans font-bold uppercase">
+                                  🔄 Written / Refreshed By Actions
+                                </span>
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {writerRefreshActions.map((w) => (
+                                    <button
+                                      key={`${w.mode}:${w.actionId}`}
+                                      type="button"
+                                      onClick={() => onLocateActionInPlayground?.(w.actionId, {})}
+                                      className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25 font-semibold"
+                                      title={`${w.title} (${w.mode}) — Click to jump to ActionCard`}
+                                    >
+                                      {w.mode} ⬅ {w.actionId} ↗
+                                    </button>
+                                  ))}
+                                  {writerRefreshActions.length === 0 && (
+                                    <span className="st-text-muted italic">None</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* 2. Hosted Bound Action Triggers (Ref & Isomorphic Inline Actions) */}
+                            <div className="flex flex-col gap-1.5">
+                              <div className="text-[11px] font-bold st-text-primary">
+                                🎯 Hosted Bound Action Triggers ({nodeTriggers.length})
+                              </div>
+                              {nodeTriggers.length === 0 ? (
+                                <div className="p-2.5 rounded-lg st-code-surface border st-border st-text-muted text-center">
+                                  No bound actions (`quickActions`, `rowActions`, `bulkActions`, `nodeActions`, or `cellAction`) configured on this DataNode.
+                                </div>
+                              ) : (
+                                <div className="rounded-xl border st-border overflow-x-auto">
+                                  <table className="w-full text-left border-collapse text-xs">
+                                    <thead>
+                                      <tr className="border-b st-border st-surface-muted text-[11px] font-bold st-text-secondary uppercase">
+                                        <th className="py-2 px-2.5">Slot</th>
+                                        <th className="py-2 px-2.5">Label</th>
+                                        <th className="py-2 px-2.5">Target / Inline Action</th>
+                                        <th className="py-2 px-2.5">Args / Multi-Source Scope</th>
+                                        <th className="py-2 px-2.5 text-right">Actions</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y st-border">
+                                      {nodeTriggers.map(({ kind, trigger }, tIdx) => {
+                                        const actId = trigger.actionId || "";
+                                        const info = actionsMap.get(actId);
+                                        const isInline = Boolean(
+                                          info?.action.inlineHost || actId.startsWith("inline:")
+                                        );
+                                        return (
+                                          <tr key={tIdx} className="hover:st-surface-muted">
+                                            <td className="py-2 px-2.5 font-mono text-[11px] st-text-secondary">
+                                              {kind}
+                                            </td>
+                                            <td className="py-2 px-2.5 font-semibold st-text-primary">
+                                              {trigger.label}
+                                            </td>
+                                            <td className="py-2 px-2.5">
+                                              {info ? (
+                                                <div className="flex flex-col gap-0.5">
+                                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <code className="font-mono font-bold text-sky-600 dark:text-sky-400">
+                                                      {actId}
+                                                    </code>
+                                                    <span
+                                                      className={`px-1.5 py-0.2 rounded text-[10px] font-semibold ${
+                                                        isInline
+                                                          ? "bg-sky-500/15 text-sky-700 dark:text-sky-300"
+                                                          : info.action.intermediate
+                                                            ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                                                            : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                                      }`}
+                                                    >
+                                                      {isInline
+                                                        ? "⚡ Inline Action"
+                                                        : info.action.intermediate
+                                                          ? "🔬 Intermediate"
+                                                          : "Ref Action"}
                                                     </span>
-                                                  )}
+                                                  </div>
+                                                  <span className="text-[11px] st-text-secondary font-mono truncate max-w-xs">
+                                                    {isInline
+                                                      ? info.action.command
+                                                      : `${info.action.title} (${info.groupName})`}
+                                                  </span>
                                                 </div>
-                                                <span className="text-[11px] st-text-secondary">
-                                                  {info.action.title} ({info.groupName})
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300 font-mono font-semibold">
+                                                  ❌ {actId} (Not Found)
                                                 </span>
+                                              )}
+                                            </td>
+                                            <td className="py-2 px-2.5 font-mono text-[11px]">
+                                              {trigger.args && Object.keys(trigger.args).length > 0 ? (
+                                                <code className="break-all">
+                                                  {JSON.stringify(trigger.args)}
+                                                </code>
+                                              ) : isInline ? (
+                                                <span className="st-text-secondary">
+                                                  Direct 4-Layer Scope (self/row/data/context)
+                                                </span>
+                                              ) : (
+                                                <span className="st-text-muted">(default form)</span>
+                                              )}
+                                            </td>
+                                            <td className="py-2 px-2.5 text-right whitespace-nowrap">
+                                              <div className="inline-flex items-center gap-1.5">
+                                                {info && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      onLocateActionInPlayground?.(actId, {})
+                                                    }
+                                                    className="px-2 py-1 rounded-lg st-btn-secondary font-semibold"
+                                                    title="Jump to ActionCard in Playground"
+                                                  >
+                                                    ↗ Jump
+                                                  </button>
+                                                )}
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    triggerBound(node, kind, trigger, {
+                                                      row: sampleRowForAudit,
+                                                      selectedRows: [sampleRowForAudit],
+                                                      scopeSummary:
+                                                        Array.isArray(snap?.value?.rows) &&
+                                                        snap.value.rows.length > 0
+                                                          ? "Sampled from Row #1"
+                                                          : "Sampled with column placeholders",
+                                                    })
+                                                  }
+                                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+                                                >
+                                                  <Eye className="w-3 h-3" />
+                                                  <span>Audit & Run</span>
+                                                </button>
                                               </div>
-                                            ) : (
-                                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300 font-mono font-semibold">
-                                                ❌ {trigger.actionId} (Not Found)
-                                              </span>
-                                            )}
-                                          </td>
-                                          <td className="py-2 px-2.5 font-mono">
-                                            <span className="px-1.5 py-0.5 rounded st-pill">
-                                              {trigger.mode || "run"}
-                                            </span>
-                                          </td>
-                                          <td className="py-2 px-2.5 font-mono text-[11px]">
-                                            {trigger.args && Object.keys(trigger.args).length > 0 ? (
-                                              <code className="break-all">
-                                                {JSON.stringify(trigger.args)}
-                                              </code>
-                                            ) : (
-                                              <span className="st-text-muted">(none)</span>
-                                            )}
-                                          </td>
-                                          <td className="py-2 px-2.5 text-right">
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                triggerBound(node, kind, trigger, {
-                                                  row: sampleRowForAudit,
-                                                  selectedRows: [sampleRowForAudit],
-                                                  scopeSummary:
-                                                    Array.isArray(snap?.value?.rows) &&
-                                                    snap.value.rows.length > 0
-                                                      ? "Sampled from Row #1"
-                                                      : "Sampled with column placeholders",
-                                                })
-                                              }
-                                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
-                                            >
-                                              <Eye className="w-3 h-3" />
-                                              <span>Audit & Run</span>
-                                            </button>
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
-                                </table>
-                              </div>
-                            )}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         )}
 
-                        {activeInspectTab === "raw" && (
+                        {activeInspectTab === "views" && (
                           <div className="flex flex-col gap-2.5">
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono text-[11px]">
-                              <div className="p-2 rounded-lg st-code-surface border st-border">
-                                <span className="st-text-muted block text-[10px]">Depends On:</span>
-                                <span className="st-text-primary font-semibold">
-                                  {node.sync?.dependsOn?.join(", ") || "None"}
+                            <div className="flex items-center gap-2 flex-wrap font-mono text-[11px]">
+                              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold">
+                                Primitive: {primitive}
+                              </span>
+                              <span className="px-2 py-0.5 rounded st-pill">
+                                Default Shape: {baseShape} · Active View: {shape}
+                              </span>
+                              <span className="px-2 py-0.5 rounded st-pill">
+                                Available Views: {availableViews.join(", ") || baseShape}
+                              </span>
+                              {node.pivot && (
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  pivot: rowKey={node.pivot.rowKey}
+                                  {node.pivot.colKeys
+                                    ? ` colKeys=[${node.pivot.colKeys.join(",")}]`
+                                    : node.pivot.colKey
+                                      ? ` colKey=${node.pivot.colKey}`
+                                      : ""}
                                 </span>
-                              </div>
-                              <div className="p-2 rounded-lg st-code-surface border st-border">
-                                <span className="st-text-muted block text-[10px]">Consumed By:</span>
-                                <span className="st-text-primary font-semibold">
-                                  {snap?.consumedBy?.join(", ") || "None"}
+                              )}
+                              {node.treeSpec?.groupBy && (
+                                <span className="px-2 py-0.5 rounded st-pill">
+                                  treeSpec.groupBy: [{node.treeSpec.groupBy.join(", ")}]
                                 </span>
-                              </div>
-                              <div className="p-2 rounded-lg st-code-surface border st-border">
-                                <span className="st-text-muted block text-[10px]">
-                                  Invalidate On Actions:
-                                </span>
-                                <span className="st-text-primary font-semibold">
-                                  {node.sync?.invalidateOnActions?.join(", ") || "None"}
-                                </span>
-                              </div>
+                              )}
                             </div>
 
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
                               <div className="st-code-surface rounded-xl border st-border p-2.5 font-mono text-[11px] max-h-52 overflow-y-auto">
                                 <div className="text-[10px] st-text-muted mb-1 font-sans font-semibold">
-                                  Normalized Value (`snap.value`):
+                                  Normalized Payload (`snap.value`):
                                 </div>
                                 <pre className="whitespace-pre-wrap break-all">
                                   {JSON.stringify(snap?.value ?? null, null, 2)}
@@ -1762,6 +2555,37 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                                 </pre>
                               </div>
                             </div>
+                          </div>
+                        )}
+
+                        {activeInspectTab === "raw" && (
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] st-text-muted font-mono">
+                                Raw DataNode Declaration (JSON · {nodeProvenance}):
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(JSON.stringify(node, null, 2));
+                                  setCopiedSourceNodeId(node.id);
+                                  setTimeout(() => setCopiedSourceNodeId(null), 1500);
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded st-btn-secondary font-semibold"
+                              >
+                                {copiedSourceNodeId === node.id ? (
+                                  <Check className="w-3 h-3 text-emerald-500" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                                <span>
+                                  {copiedSourceNodeId === node.id ? "Copied" : "Copy JSON"}
+                                </span>
+                              </button>
+                            </div>
+                            <pre className="st-code-surface rounded-xl border st-border p-3 font-mono text-[11px] overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all select-all">
+                              {JSON.stringify(node, null, 2)}
+                            </pre>
                           </div>
                         )}
                       </div>
@@ -2976,31 +3800,156 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
           return null;
         }
 
-        if (workbenchLayout === "split") {
-          const groupedByCat = new Map<string, DataNode[]>();
-          for (const n of workbenchNodes) {
-            const cat = n.category || "Data Nodes";
-            const list = groupedByCat.get(cat) || [];
-            list.push(n);
-            groupedByCat.set(cat, list);
-          }
+        const renderNodeInAccordionRow = (n: DataNode) => {
+          const isOpen = expandedAccordionIds.has(n.id);
+          const nSnap = snapshots[n.id];
+          const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
+          const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
+          const nPrim = nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
+          const summaryText = summarizeNodeSnapshot(n, nSnap);
 
+          return (
+            <div
+              key={n.id}
+              className="st-card rounded-2xl overflow-hidden border st-border transition-all"
+            >
+              <div
+                onClick={() =>
+                  setExpandedAccordionIds((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(n.id)) next.delete(n.id);
+                    else next.add(n.id);
+                    return next;
+                  })
+                }
+                className="px-4 py-3 flex items-center justify-between gap-3 cursor-pointer select-none hover:st-surface-muted"
+              >
+                <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
+                  {isOpen ? (
+                    <ChevronDown className="w-4 h-4 text-sky-500 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 st-text-muted shrink-0" />
+                  )}
+                  <span className="text-sm font-bold st-text-primary truncate">{n.title}</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25">
+                    {nPrim} ➔ {nShape.toUpperCase()}
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[11px] font-mono st-pill">
+                    {summaryText}
+                  </span>
+                </div>
+
+                <div
+                  className="flex items-center gap-1.5 shrink-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {(n.quickActions || []).map((qa, idx) =>
+                    renderBoundTriggerButton(
+                      n,
+                      "Quick Action",
+                      qa,
+                      { scopeSummary: "Card Quick Action" },
+                      idx,
+                      "secondary"
+                    )
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => refreshSingleNode(n)}
+                    className="p-1.5 rounded-lg st-btn-secondary"
+                    title="Refresh data node"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        loadingMap[n.id] ? "animate-spin text-sky-500" : ""
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {isOpen && (
+                <div className="p-3 pt-0 border-t st-border">{renderDataNodeCard(n)}</div>
+              )}
+            </div>
+          );
+        };
+
+        if (workbenchLayout === "split") {
           const pinnedNodes = workbenchNodes.filter((n) => pinnedNodeIds.includes(n.id));
-          const focusedNode =
-            workbenchNodes.find((n) => n.id === focusedDataNodeId) || workbenchNodes[0] || null;
-          const canvasNodes = [...pinnedNodes];
-          if (focusedNode && !canvasNodes.some((n) => n.id === focusedNode.id)) {
-            canvasNodes.push(focusedNode);
-          }
+          const pinnedSet = new Set(pinnedNodes.map((n) => n.id));
+          const scopeNodes = scopedWorkbenchNodes.filter((n) => !pinnedSet.has(n.id));
+
+          const renderTreeLeafItem = (n: DataNode) => {
+            const nSnap = snapshots[n.id];
+            const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
+            const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
+            const nPrim = nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
+            const isFocusedLeaf = dataScope.kind === "node" && dataScope.nodeId === n.id;
+            const isPinned = pinnedNodeIds.includes(n.id);
+            const summaryText = summarizeNodeSnapshot(n, nSnap);
+
+            return (
+              <div
+                key={n.id}
+                onClick={() => setDataScope({ kind: "node", nodeId: n.id })}
+                className={`group rounded-xl px-2.5 py-2 border transition-all cursor-pointer flex flex-col gap-1 ${
+                  isFocusedLeaf
+                    ? "bg-sky-500/15 border-sky-500/50 shadow-sm"
+                    : isPinned
+                      ? "st-subcard border-sky-500/30"
+                      : "border-transparent hover:st-surface-muted"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1.5">
+                  <span
+                    className={`text-xs truncate ${
+                      isFocusedLeaf
+                        ? "font-bold text-sky-700 dark:text-sky-300"
+                        : "font-semibold st-text-primary"
+                    }`}
+                  >
+                    {n.title}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePinNode(n.id);
+                    }}
+                    className={`p-1 rounded-md text-[10px] font-mono transition-colors shrink-0 ${
+                      isPinned
+                        ? "bg-sky-600 text-white"
+                        : "opacity-60 group-hover:opacity-100 st-btn-secondary"
+                    }`}
+                    title={
+                      isPinned
+                        ? "Unpin from split-view canvas"
+                        : "Pin card to keep visible at top of canvas while browsing other scopes"
+                    }
+                  >
+                    <Pin className="w-3 h-3" />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between gap-1.5 text-[10.5px] font-mono">
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 font-semibold">
+                    {nPrim} ➔ {nShape.toUpperCase()}
+                  </span>
+                  <span className="st-text-muted truncate">{summaryText}</span>
+                </div>
+              </div>
+            );
+          };
 
           return (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-              {/* Left Categorized DataNode Navigator */}
-              <aside className="lg:col-span-4 xl:col-span-3 st-card rounded-2xl p-3 flex flex-col gap-2.5 lg:sticky lg:top-4 max-h-[76vh] overflow-y-auto">
+              {/* Left 4-Level Clickable Data Scope Tree (All ➔ Category ➔ Subgroup ➔ Node) */}
+              <aside className="lg:col-span-4 xl:col-span-3 st-card rounded-2xl p-3 flex flex-col gap-2 lg:sticky lg:top-4 max-h-[78vh] overflow-y-auto">
                 <div className="flex items-center justify-between px-1 pb-2 border-b st-border">
                   <span className="text-xs font-bold st-text-primary flex items-center gap-1.5">
                     <Layers className="w-3.5 h-3.5 text-sky-500" />
-                    <span>Data Nodes ({workbenchNodes.length})</span>
+                    <span>Data Hierarchy</span>
                   </span>
                   {pinnedNodes.length > 0 && (
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/15 text-sky-700 dark:text-sky-300 font-semibold">
@@ -3009,82 +3958,148 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
                   )}
                 </div>
 
-                {Array.from(groupedByCat.entries()).map(([catName, catNodes]) => (
-                  <div key={catName} className="flex flex-col gap-1">
-                    {groupedByCat.size > 1 && (
-                      <div className="px-1.5 pt-1 text-[10.5px] font-bold uppercase tracking-wider st-text-muted">
-                        {catName}
+                {/* Level 0: All Data Nodes */}
+                <button
+                  type="button"
+                  onClick={() => setDataScope({ kind: "all" })}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between transition-all ${
+                    dataScope.kind === "all"
+                      ? "bg-sky-600 text-white shadow-sm"
+                      : "hover:st-surface-muted st-text-primary"
+                  }`}
+                >
+                  <span>All Data Nodes</span>
+                  <span className="text-[11px] font-mono opacity-80">{workbenchNodes.length}</span>
+                </button>
+
+                {/* Level 1: Category Headers (Clickable!) -> Level 2: Subgroup Headers (Clickable!) -> Level 3: Leaf Nodes */}
+                <div className="flex flex-col gap-1.5">
+                  {dataHierarchyTree.map((catEntry) => {
+                    const isCatSelected =
+                      dataScope.kind === "category" && dataScope.category === catEntry.category;
+                    const isCatExpanded = expandedDataCategories.has(catEntry.category);
+                    const hasSubgroups = catEntry.subgroups.size > 0;
+                    const ungroupedNodes = catEntry.nodes.filter(
+                      (n) => !getNodeCategoryAndSubgroup(n).subgroup
+                    );
+
+                    return (
+                      <div key={catEntry.category} className="flex flex-col gap-1">
+                        {dataHierarchyTree.length > 1 || hasSubgroups ? (
+                          <div
+                            onClick={() => {
+                              setDataScope({ kind: "category", category: catEntry.category });
+                              setExpandedDataCategories((prev) =>
+                                new Set([...prev, catEntry.category])
+                              );
+                            }}
+                            className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl text-xs cursor-pointer transition-all ${
+                              isCatSelected
+                                ? "bg-sky-500/15 text-sky-700 dark:text-sky-300 font-bold border border-sky-500/40 shadow-sm"
+                                : "hover:st-surface-muted st-text-primary font-bold"
+                            }`}
+                            title={`Click to display all ${catEntry.nodes.length} DataNode(s) in category "${catEntry.category}"`}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setExpandedDataCategories((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(catEntry.category)) next.delete(catEntry.category);
+                                    else next.add(catEntry.category);
+                                    return next;
+                                  });
+                                }}
+                                className="p-0.5 rounded hover:bg-black/10 shrink-0"
+                              >
+                                {isCatExpanded ? (
+                                  <ChevronDown className="w-3.5 h-3.5 st-text-muted" />
+                                ) : (
+                                  <ChevronRight className="w-3.5 h-3.5 st-text-muted" />
+                                )}
+                              </button>
+                              <span className="truncate">📁 {catEntry.category}</span>
+                            </div>
+                            <span className="text-[11px] font-mono st-text-muted ml-1.5 shrink-0">
+                              {catEntry.nodes.length}
+                            </span>
+                          </div>
+                        ) : null}
+
+                        {isCatExpanded && (
+                          <div
+                            className={
+                              dataHierarchyTree.length > 1 || hasSubgroups
+                                ? "pl-3 border-l st-border ml-2.5 flex flex-col gap-1"
+                                : "flex flex-col gap-1"
+                            }
+                          >
+                            {/* Subgroup headers */}
+                            {Array.from(catEntry.subgroups.entries()).map(([sgName, sgNodes]) => {
+                              const isSgSelected =
+                                dataScope.kind === "subgroup" &&
+                                dataScope.category === catEntry.category &&
+                                dataScope.subgroup === sgName;
+                              return (
+                                <div key={sgName} className="flex flex-col gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDataScope({
+                                        kind: "subgroup",
+                                        category: catEntry.category,
+                                        subgroup: sgName,
+                                      })
+                                    }
+                                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[11.5px] flex items-center justify-between transition-all ${
+                                      isSgSelected
+                                        ? "bg-sky-600 text-white font-semibold shadow-sm"
+                                        : "hover:st-surface-muted st-text-secondary font-semibold"
+                                    }`}
+                                    title={`Click to display all ${sgNodes.length} DataNode(s) in subgroup "${sgName}"`}
+                                  >
+                                    <span className="truncate">📂 {sgName}</span>
+                                    <span className="text-[10.5px] font-mono opacity-80 ml-1">
+                                      {sgNodes.length}
+                                    </span>
+                                  </button>
+                                  <div className="pl-2.5 border-l st-border ml-2 flex flex-col gap-1">
+                                    {sgNodes.map((n) => renderTreeLeafItem(n))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {/* Ungrouped nodes directly under category */}
+                            {ungroupedNodes.map((n) => renderTreeLeafItem(n))}
+                          </div>
+                        )}
                       </div>
-                    )}
-                    {catNodes.map((n) => {
-                      const nSnap = snapshots[n.id];
-                      const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
-                      const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
-                      const nPrim =
-                        nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
-                      const isFocused = focusedNode?.id === n.id;
-                      const isPinned = pinnedNodeIds.includes(n.id);
-                      const summaryText = summarizeNodeSnapshot(n, nSnap);
-
-                      return (
-                        <div
-                          key={n.id}
-                          onClick={() => setFocusedDataNodeId(n.id)}
-                          className={`group rounded-xl px-2.5 py-2 border transition-all cursor-pointer flex flex-col gap-1 ${
-                            isFocused
-                              ? "bg-sky-500/15 border-sky-500/50 shadow-sm"
-                              : isPinned
-                                ? "st-subcard border-sky-500/30"
-                                : "border-transparent hover:st-surface-muted"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-1.5">
-                            <span
-                              className={`text-xs truncate ${
-                                isFocused
-                                  ? "font-bold text-sky-700 dark:text-sky-300"
-                                  : "font-semibold st-text-primary"
-                              }`}
-                            >
-                              {n.title}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                togglePinNode(n.id);
-                              }}
-                              className={`p-1 rounded-md text-[10px] font-mono transition-colors shrink-0 ${
-                                isPinned
-                                  ? "bg-sky-600 text-white"
-                                  : "opacity-60 group-hover:opacity-100 st-btn-secondary"
-                              }`}
-                              title={
-                                isPinned
-                                  ? "Unpin from split-view canvas"
-                                  : "Pin card to keep visible while inspecting other nodes"
-                              }
-                            >
-                              <Pin className="w-3 h-3" />
-                            </button>
-                          </div>
-
-                          <div className="flex items-center justify-between gap-1.5 text-[10.5px] font-mono">
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 font-semibold">
-                              {nPrim} ➔ {nShape.toUpperCase()}
-                            </span>
-                            <span className="st-text-muted truncate">{summaryText}</span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
+                    );
+                  })}
+                </div>
               </aside>
 
-              {/* Right Active Canvas (Pinned Master Node(s) + Focused Detail Node) */}
+              {/* Right Active Canvas (Pinned Master Node(s) + Current Scope Nodes) */}
               <div className="lg:col-span-8 xl:col-span-9 flex flex-col gap-4 min-w-0">
-                {canvasNodes.map((n) => renderDataNodeCard(n))}
+                {pinnedNodes.map((n) => renderDataNodeCard(n))}
+
+                {scopeNodes.length > 0 &&
+                  (scopeDisplayDensity === "accordion" ? (
+                    <div className="flex flex-col gap-2.5">
+                      {scopeNodes.map((n) => renderNodeInAccordionRow(n))}
+                    </div>
+                  ) : scopeDisplayDensity === "grid" ? (
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                      {scopeNodes.map((n) => renderDataNodeCard(n))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-4">
+                      {scopeNodes.map((n) => renderDataNodeCard(n))}
+                    </div>
+                  ))}
               </div>
             </div>
           );
@@ -3093,90 +4108,14 @@ export const StatusProbesBar: React.FC<StatusProbesBarProps> = ({
         if (workbenchLayout === "accordion") {
           return (
             <div className="flex flex-col gap-2.5">
-              {workbenchNodes.map((n) => {
-                const isOpen = expandedAccordionIds.has(n.id);
-                const nSnap = snapshots[n.id];
-                const nBaseShape = (nSnap?.shape || n.shape || "raw") as DataShape;
-                const nShape = (viewModeOverride[n.id] || nBaseShape) as DataShape;
-                const nPrim =
-                  nSnap?.primitive || inferDataPrimitive(nBaseShape, nSnap?.rawParsed);
-                const summaryText = summarizeNodeSnapshot(n, nSnap);
-
-                return (
-                  <div
-                    key={n.id}
-                    className="st-card rounded-2xl overflow-hidden border st-border transition-all"
-                  >
-                    <div
-                      onClick={() =>
-                        setExpandedAccordionIds((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(n.id)) next.delete(n.id);
-                          else next.add(n.id);
-                          return next;
-                        })
-                      }
-                      className="px-4 py-3 flex items-center justify-between gap-3 cursor-pointer select-none hover:st-surface-muted"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
-                        {isOpen ? (
-                          <ChevronDown className="w-4 h-4 text-sky-500 shrink-0" />
-                        ) : (
-                          <ChevronRight className="w-4 h-4 st-text-muted shrink-0" />
-                        )}
-                        <span className="text-sm font-bold st-text-primary truncate">
-                          {n.title}
-                        </span>
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25">
-                          {nPrim} ➔ {nShape.toUpperCase()}
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[11px] font-mono st-pill">
-                          {summaryText}
-                        </span>
-                      </div>
-
-                      <div
-                        className="flex items-center gap-1.5 shrink-0"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {(n.quickActions || []).map((qa, idx) =>
-                          renderBoundTriggerButton(
-                            n,
-                            "Quick Action",
-                            qa,
-                            { scopeSummary: "Card Quick Action" },
-                            idx,
-                            "secondary"
-                          )
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => refreshSingleNode(n)}
-                          className="p-1.5 rounded-lg st-btn-secondary"
-                          title="Refresh data node"
-                        >
-                          <RefreshCw
-                            className={`w-3.5 h-3.5 ${
-                              loadingMap[n.id] ? "animate-spin text-sky-500" : ""
-                            }`}
-                          />
-                        </button>
-                      </div>
-                    </div>
-
-                    {isOpen && (
-                      <div className="p-3 pt-0 border-t st-border">{renderDataNodeCard(n)}</div>
-                    )}
-                  </div>
-                );
-              })}
+              {scopedWorkbenchNodes.map((n) => renderNodeInAccordionRow(n))}
             </div>
           );
         }
 
         return (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {workbenchNodes.map((n) => renderDataNodeCard(n))}
+            {scopedWorkbenchNodes.map((n) => renderDataNodeCard(n))}
           </div>
         );
       })()}
@@ -3231,12 +4170,22 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
   onExecute,
   onExecuteBoundTrigger,
 }) => {
-  const targetInfo = actionsMap.get(activeAudit.trigger.actionId);
+  const actId = activeAudit.trigger.actionId || "";
+  const targetInfo = actionsMap.get(actId);
   const targetAction = targetInfo?.action;
+  const isInline = Boolean(targetAction?.inlineHost || actId.startsWith("inline:"));
   const rawArgsObj = activeAudit.trigger.args || {};
   const rawArgEntries = Object.entries(rawArgsObj);
   const formFields = targetAction?.form || [];
   const formMap = new Map(formFields.map((f) => [f.key, f]));
+  const hostSnap = activeAudit.focusScope.hostNodeId
+    ? dataSnapshots[activeAudit.focusScope.hostNodeId]
+    : undefined;
+  const selfCountSummary = resolveSelfSnapshotPath(hostSnap, "count");
+  const effectiveFocusRow =
+    activeAudit.focusScope.row ||
+    activeAudit.focusScope.node?.rawRow ||
+    activeAudit.focusScope.cell?.rawRow;
 
   return (
     <div
@@ -3253,7 +4202,11 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
             <div className="flex items-center gap-2 flex-wrap">
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-bold bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-500/30">
                 <Eye className="w-3.5 h-3.5" />
-                <span>Bound Action Audit & Execution</span>
+                <span>
+                  {isInline
+                    ? "⚡ Inline Bound Action Audit & Execution"
+                    : "Bound Action Audit & Execution"}
+                </span>
               </span>
               <span className="px-2 py-0.5 rounded-md text-xs font-mono st-pill">
                 {activeAudit.triggerKind}: "{activeAudit.trigger.label}"
@@ -3268,18 +4221,18 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
               )}
             </div>
             <div className="text-xs st-text-secondary flex items-center gap-1.5 flex-wrap mt-0.5">
-              <span>From DataNode:</span>
+              <span>Host DataNode:</span>
               <code className="font-mono font-semibold st-text-primary">
                 {activeAudit.node.title} ({activeAudit.node.id})
               </code>
-              <span>→ Target Action:</span>
+              <span>→ {isInline ? "Inline Action:" : "Target Action:"}</span>
               {targetAction ? (
                 <code className="font-mono font-bold text-sky-600 dark:text-sky-400">
                   {targetAction.title} ({targetAction.id})
                 </code>
               ) : (
                 <code className="font-mono font-bold text-rose-500">
-                  ❌ {activeAudit.trigger.actionId} (Not Found)
+                  ❌ {actId} (Not Found)
                 </code>
               )}
               {targetInfo?.groupName && (
@@ -3293,16 +4246,16 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
               <button
                 type="button"
                 onClick={() => {
-                  const actId = targetAction.id;
                   const vals = activeAudit.resolvedArgs;
                   onClose();
                   if (onLocateActionInPlayground) {
-                    onLocateActionInPlayground(actId, vals);
+                    onLocateActionInPlayground(targetAction.id, vals);
                   } else {
                     onExecuteBoundTrigger({
-                      actionId: actId,
+                      actionId: targetAction.id,
                       mode: "prefill",
                       formValues: vals,
+                      focusScope: activeAudit.focusScope,
                     });
                   }
                 }}
@@ -3324,18 +4277,38 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
           </div>
         </div>
 
-        {/* Section 1: Argument Binding Mapping Audit Table */}
-        <div className="flex flex-col gap-1.5">
+        {/* Section 1: 4-Layer Scope & Argument Binding Audit */}
+        <div className="flex flex-col gap-2">
           <div className="text-xs font-bold st-text-primary flex items-center justify-between">
-            <span>1. Argument Binding Audit (Template → Resolved Row Value → Form Field)</span>
+            <span>
+              1. 4-Layer Focus Scope (`self` / `row` / `node` / `cell`) & Argument Binding Audit
+            </span>
             <span className="text-[11px] font-mono st-text-muted">
               {rawArgEntries.length} bound arg(s)
             </span>
           </div>
 
+          {effectiveFocusRow && (
+            <div className="px-3 py-2 rounded-xl st-code-surface border st-border text-[11px] font-mono flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-bold">
+                  L4 Host Focus Scope
+                </span>
+                {selfCountSummary && (
+                  <span className="st-text-secondary">self.count={selfCountSummary}</span>
+                )}
+                <span className="st-text-primary truncate max-w-md">
+                  row={JSON.stringify(effectiveFocusRow)}
+                </span>
+              </div>
+            </div>
+          )}
+
           {rawArgEntries.length === 0 ? (
             <div className="px-3 py-2 rounded-xl st-subcard border st-border text-xs st-text-muted font-mono">
-              No explicit `args` mapping on this trigger — using target action's default form parameters.
+              {isInline
+                ? "Inline Action interpolates {{self.*}}, {{row.*}}, {{data.<nodeId>.*}}, {{context.*}}, and {{form.*}} directly in its command template."
+                : "No explicit `args` mapping on this trigger — using target action's default form parameters."}
             </div>
           ) : (
             <div className="rounded-xl border st-border overflow-x-auto">
@@ -3415,6 +4388,7 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
               activeWorkspace={activeWorkspace}
               refreshTrigger={refreshTrigger}
               prefillValues={activeAudit.resolvedArgs}
+              focusScope={activeAudit.focusScope}
               uiEnvOverride={commandEnvOverrides?.[`action:${targetAction.id}`]}
               dataSnapshots={dataSnapshots}
               inAuditModal={true}
@@ -3426,12 +4400,13 @@ export const BoundActionInspectorModal: React.FC<BoundActionInspectorModalProps>
               }}
               onExecute={async (p) => {
                 if (onExecute) {
-                  await onExecute(p);
+                  await onExecute({ ...p, focusScope: activeAudit.focusScope });
                 } else {
                   await onExecuteBoundTrigger({
                     actionId: p.actionId,
                     mode: "run",
                     formValues: p.formValues,
+                    focusScope: activeAudit.focusScope,
                   });
                 }
               }}

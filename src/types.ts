@@ -196,12 +196,120 @@ export const TableColumnSchema = z.object({
 
 export type TableColumn = z.infer<typeof TableColumnSchema>;
 
-export const BoundActionTriggerSchema = z.object({
-  label: z.string(),
-  actionId: z.string(),
-  mode: z.enum(["run", "prefill"]).default("run"),
-  args: z.record(z.string(), z.unknown()).optional(),
+export const ActionPreconditionSchema = z.object({
+  dataNodeId: z.string(),
+  field: z.string().optional(),
+  equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  notEquals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  notEmpty: z.boolean().optional(),
+  minRows: z.number().optional(),
+  contains: z.string().optional(),
+  message: z.string(),
+  fixActionId: z.string().optional(),
 });
+
+export type ActionPrecondition = z.infer<typeof ActionPreconditionSchema>;
+
+export const ActionOutputSchema = z.object({
+  intoData: z.string().optional(),
+  refreshData: z.array(z.string()).optional(),
+  parse: DataParserSchema.optional(),
+  transform: DataTransformSchema.optional(),
+  shape: DataShapeSchema.optional(),
+});
+
+export type ActionOutput = z.infer<typeof ActionOutputSchema>;
+
+export const ArtifactKindSchema = z.enum(["html", "file", "json", "image", "markdown"]);
+export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
+
+export const ArtifactOnCompleteSchema = z.enum(["badge", "open", "download"]);
+export type ArtifactOnComplete = z.infer<typeof ArtifactOnCompleteSchema>;
+
+export const ArtifactRuleObjectSchema = z.object({
+  path: z.string().optional(),
+  fromStdout: z.string().optional(),
+  label: z.string().optional(),
+  kind: ArtifactKindSchema.optional(),
+  onComplete: ArtifactOnCompleteSchema.default("badge").optional(),
+});
+
+export type ArtifactRuleObject = z.infer<typeof ArtifactRuleObjectSchema>;
+
+export const ArtifactRuleSchema = z.union([z.string(), ArtifactRuleObjectSchema]);
+export type ArtifactRule = z.infer<typeof ArtifactRuleSchema>;
+
+export interface RunArtifact {
+  label: string;
+  path: string;
+  filename: string;
+  kind: ArtifactKind;
+  sizeBytes: number;
+  onComplete: ArtifactOnComplete;
+}
+
+export interface BindingFocusScope {
+  hostNodeId?: string;
+  row?: Record<string, unknown>;
+  selectedRows?: Record<string, unknown>[];
+  cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
+  node?: {
+    id: string;
+    label?: string;
+    value?: unknown;
+    path?: string;
+    upstreamIds?: string[];
+    downstreamIds?: string[];
+    rawRow?: Record<string, unknown>;
+  };
+}
+
+export interface InlineActionHostMeta {
+  nodeId: string;
+  nodeTitle?: string;
+  slot: "quick" | "row" | "bulk" | "cell" | "node";
+  label: string;
+}
+
+export const BoundActionTriggerSchema = z
+  .object({
+    id: z.string().optional(),
+    label: z.string(),
+    actionId: z.string().optional(),
+    mode: z.enum(["run", "prefill"]).default("run"),
+    args: z.record(z.string(), z.unknown()).optional(),
+    // Inline ActionItem-isomorphic fields:
+    title: z.string().optional(),
+    description: z.string().optional(),
+    danger: z.enum(["safe", "warn", "danger"]).optional(),
+    requiresHumanApprovalFlag: z.string().optional(),
+    interactive: z.boolean().optional(),
+    defaultRunner: z
+      .enum(["web_terminal", "external_terminal", "copy_command", "copy_agent_prompt"])
+      .optional(),
+    cwd: z.string().optional(),
+    python: z.string().optional(),
+    envFile: z.string().optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    command: z.string().optional(),
+    script: z.string().optional(),
+    form: z.array(FormFieldSchema).optional(),
+    preconditions: z.array(ActionPreconditionSchema).optional(),
+    artifacts: z.array(ArtifactRuleSchema).optional(),
+    output: ActionOutputSchema.optional(),
+  })
+  .superRefine((val, ctx) => {
+    const hasActionRef = Boolean(val.actionId && val.actionId.trim());
+    const hasInlineExec = Boolean(
+      (val.command && val.command.trim()) || (val.script && val.script.trim())
+    );
+    if (!hasActionRef && !hasInlineExec) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `BoundActionTrigger "${val.label}" must specify either actionId or inline command/script.`,
+      });
+    }
+  });
 
 export type BoundActionTrigger = z.infer<typeof BoundActionTriggerSchema>;
 
@@ -210,6 +318,7 @@ export const DataSyncSchema = z.object({
   ttlMs: z.number().default(15000),
   dependsOn: z.array(z.string()).optional(),
   watchFiles: z.array(z.string()).optional(),
+  refreshAfterActions: z.array(z.string()).optional(),
   invalidateOnActions: z.array(z.string()).optional(),
   pollMs: z.number().optional(),
   stream: z.boolean().optional(),
@@ -300,6 +409,7 @@ export const DataNodeSchema = z.object({
   title: z.string(),
   description: z.string().optional(),
   category: z.string().optional(),
+  subgroup: z.string().optional(),
   intermediate: z.boolean().optional(),
   hidden: z.boolean().optional(),
   runtime: DataRuntimeSchema.default("zsh"),
@@ -342,63 +452,21 @@ export const DataNodeSchema = z.object({
 
 export type DataNode = z.infer<typeof DataNodeSchema>;
 
-export const ActionPreconditionSchema = z.object({
-  dataNodeId: z.string(),
-  field: z.string().optional(),
-  equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
-  notEquals: z.union([z.string(), z.number(), z.boolean()]).optional(),
-  notEmpty: z.boolean().optional(),
-  minRows: z.number().optional(),
-  contains: z.string().optional(),
-  message: z.string(),
-  fixActionId: z.string().optional(),
-});
-
-export type ActionPrecondition = z.infer<typeof ActionPreconditionSchema>;
-
-export const ActionOutputSchema = z.object({
-  intoData: z.string().optional(),
-  parse: DataParserSchema.optional(),
-  transform: DataTransformSchema.optional(),
-  shape: DataShapeSchema.optional(),
-});
-
-export type ActionOutput = z.infer<typeof ActionOutputSchema>;
-
-export const ArtifactKindSchema = z.enum(["html", "file", "json", "image", "markdown"]);
-export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
-
-export const ArtifactOnCompleteSchema = z.enum(["badge", "open", "download"]);
-export type ArtifactOnComplete = z.infer<typeof ArtifactOnCompleteSchema>;
-
-export const ArtifactRuleObjectSchema = z.object({
-  path: z.string().optional(),
-  fromStdout: z.string().optional(),
-  label: z.string().optional(),
-  kind: ArtifactKindSchema.optional(),
-  onComplete: ArtifactOnCompleteSchema.default("badge").optional(),
-});
-
-export type ArtifactRuleObject = z.infer<typeof ArtifactRuleObjectSchema>;
-
-export const ArtifactRuleSchema = z.union([z.string(), ArtifactRuleObjectSchema]);
-export type ArtifactRule = z.infer<typeof ArtifactRuleSchema>;
-
-export interface RunArtifact {
-  label: string;
-  path: string;
-  filename: string;
-  kind: ArtifactKind;
-  sizeBytes: number;
-  onComplete: ArtifactOnComplete;
-}
-
 export const ActionItemSchema = z
   .object({
     id: z.string(),
     title: z.string(),
     subgroup: z.string().optional(),
     description: z.string().optional(),
+    intermediate: z.boolean().optional(),
+    inlineHost: z
+      .object({
+        nodeId: z.string(),
+        nodeTitle: z.string().optional(),
+        slot: z.enum(["quick", "row", "bulk", "cell", "node"]),
+        label: z.string(),
+      })
+      .optional(),
     danger: z.enum(["safe", "warn", "danger"]).default("safe"),
     requiresHumanApprovalFlag: z.string().optional(),
     interactive: z.boolean().optional(),
@@ -426,6 +494,8 @@ export interface ActionItem {
   title: string;
   subgroup?: string;
   description?: string;
+  intermediate?: boolean;
+  inlineHost?: InlineActionHostMeta;
   danger: "safe" | "warn" | "danger";
   requiresHumanApprovalFlag?: string;
   interactive?: boolean;
@@ -611,6 +681,7 @@ export interface DataSnapshot {
   title: string;
   description?: string;
   category?: string;
+  subgroup?: string;
   intermediate?: boolean;
   primitive?: DataPrimitive;
   views?: DataShape[];

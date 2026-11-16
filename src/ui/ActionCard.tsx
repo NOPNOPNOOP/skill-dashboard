@@ -15,9 +15,14 @@ import {
   X,
 } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import { evaluateActionPrecondition } from "../interpolator.ts";
+import {
+  doesActionPatternMatch,
+  evaluateActionPrecondition,
+  extractImplicitDependencies,
+} from "../interpolator.ts";
 import type {
   ActionItem,
+  BindingFocusScope,
   BoundActionTrigger,
   CanonicalSkill,
   CommandEnvConfig,
@@ -35,6 +40,7 @@ interface ActionCardProps {
   activeWorkspace: string;
   refreshTrigger?: number;
   prefillValues?: Record<string, unknown> | null;
+  focusScope?: BindingFocusScope;
   uiEnvOverride?: CommandEnvConfig;
   dataSnapshots?: Record<string, DataSnapshot | undefined>;
   dataNodes?: DataNode[];
@@ -43,9 +49,11 @@ interface ActionCardProps {
   onExecuted?: () => void;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
   onTriggerFixAction?: (actionId: string) => void;
+  onJumpToDataNode?: (nodeId: string) => void;
   onExecute: (params: {
     actionId: string;
     formValues: Record<string, unknown>;
+    focusScope?: BindingFocusScope;
     runner: "web_terminal" | "external_terminal";
     terminalApp?: "Terminal" | "iTerm";
     humanApproved?: boolean;
@@ -63,6 +71,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   activeWorkspace,
   refreshTrigger = 0,
   prefillValues,
+  focusScope,
   uiEnvOverride,
   dataSnapshots = {},
   dataNodes = [],
@@ -71,6 +80,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
   onExecuted,
   onSkillUpdated,
   onTriggerFixAction,
+  onJumpToDataNode,
   onExecute,
 }) => {
   const [extraSnapshots, setExtraSnapshots] = useState<Record<string, DataSnapshot>>({});
@@ -249,6 +259,49 @@ export const ActionCard: React.FC<ActionCardProps> = ({
     }
     return list;
   }, [dataNodes, action.id]);
+  const multiSourceReadNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    const imp = extractImplicitDependencies(action.script || action.command || "");
+    for (const id of imp.dataNodeIds) ids.add(id);
+    for (const f of action.form || []) {
+      if (f.fromData) ids.add(f.fromData);
+    }
+    for (const pre of action.preconditions || []) {
+      if (pre.dataNodeId) ids.add(pre.dataNodeId);
+    }
+    return [...ids];
+  }, [action]);
+
+  const feedbackTargetDataNodes = useMemo(() => {
+    const list: Array<{ nodeId: string; mode: "intoData" | "refreshData" | "refreshAfterActions" }> = [];
+    const seen = new Set<string>();
+    if (action.output?.intoData) {
+      seen.add(`intoData:${action.output.intoData}`);
+      list.push({ nodeId: action.output.intoData, mode: "intoData" });
+    }
+    for (const refId of action.output?.refreshData || []) {
+      const k = `refreshData:${refId}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        list.push({ nodeId: refId, mode: "refreshData" });
+      }
+    }
+    for (const dn of dataNodes || []) {
+      const patterns = [
+        ...(dn.sync?.refreshAfterActions || []),
+        ...(dn.sync?.invalidateOnActions || []),
+      ];
+      if (patterns.some((pat) => doesActionPatternMatch(pat, action.id))) {
+        const k = `refreshAfterActions:${dn.id}`;
+        if (!seen.has(k) && !seen.has(`refreshData:${dn.id}`)) {
+          seen.add(k);
+          list.push({ nodeId: dn.id, mode: "refreshAfterActions" });
+        }
+      }
+    }
+    return list;
+  }, [action, dataNodes]);
+
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [dangerConfirmInput, setDangerConfirmInput] = useState("");
   const [pendingRunner, setPendingRunner] = useState<{
@@ -270,6 +323,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
         skillId,
         actionId: action.id,
         formValues,
+        focusScope,
       }),
     })
       .then((r) => r.json())
@@ -292,6 +346,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
     skillId,
     action.id,
     formValues,
+    JSON.stringify(focusScope || null),
     activeWorkspace,
     uiEnvOverride,
     action.cwd,
@@ -337,6 +392,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
           await onExecute({
             actionId: action.id,
             formValues,
+            focusScope,
             runner,
             terminalApp,
             humanApproved: true,
@@ -357,6 +413,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
       await onExecute({
         actionId: action.id,
         formValues,
+        focusScope,
         runner,
         terminalApp,
         humanApproved: false,
@@ -377,6 +434,7 @@ export const ActionCard: React.FC<ActionCardProps> = ({
       await onExecute({
         actionId: action.id,
         formValues,
+        focusScope,
         runner: pendingRunner.runner,
         terminalApp: pendingRunner.terminalApp,
         humanApproved: true,
@@ -427,6 +485,16 @@ export const ActionCard: React.FC<ActionCardProps> = ({
               </span>
             )}
             <h4 className="text-base font-bold st-text-primary">{action.title}</h4>
+            {action.inlineHost && (
+              <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30">
+                ⚡ Inline Action ({action.inlineHost.slot})
+              </span>
+            )}
+            {action.intermediate && !action.inlineHost && (
+              <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                🔬 Intermediate Action
+              </span>
+            )}
             {action.interactive && (
               <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border border-indigo-500/30">
                 Interactive TUI
@@ -531,10 +599,24 @@ export const ActionCard: React.FC<ActionCardProps> = ({
                   cwd: {action.cwd || "project_root"}
                 </span>
                 {action.output?.intoData && (
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                    intoData ➔ {action.output.intoData}
-                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onJumpToDataNode?.(action.output!.intoData!)}
+                    className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-colors"
+                  >
+                    intoData ➔ {action.output.intoData} ↗
+                  </button>
                 )}
+                {(action.output?.refreshData || []).map((refId) => (
+                  <button
+                    key={refId}
+                    type="button"
+                    onClick={() => onJumpToDataNode?.(refId)}
+                    className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 transition-colors"
+                  >
+                    refreshData ➔ {refId} ↗
+                  </button>
+                ))}
               </div>
               <div className="st-code-surface rounded-xl border st-border p-3 font-mono text-xs overflow-x-auto">
                 <div className="text-[10.5px] st-text-muted mb-1">
@@ -581,9 +663,14 @@ export const ActionCard: React.FC<ActionCardProps> = ({
                             </td>
                             <td className="py-1.5 px-2.5">
                               {f.fromData ? (
-                                <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
-                                  data:{f.fromData}
-                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => onJumpToDataNode?.(f.fromData!)}
+                                  className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-500/25 transition-colors"
+                                  title="Jump to upstream DataNode"
+                                >
+                                  data:{f.fromData} ↗
+                                </button>
                               ) : (
                                 "—"
                               )}
@@ -610,9 +697,14 @@ export const ActionCard: React.FC<ActionCardProps> = ({
                         className="px-2.5 py-1.5 rounded-lg st-code-surface border st-border flex items-center justify-between gap-2 flex-wrap font-mono text-[11px]"
                       >
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 font-semibold">
-                            data:{ub.nodeId}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onJumpToDataNode?.(ub.nodeId)}
+                            className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 font-semibold hover:bg-sky-500/25 transition-colors"
+                            title="Jump to host DataNode"
+                          >
+                            data:{ub.nodeId} ↗
+                          </button>
                           <span className="st-text-muted">({ub.kind})</span>
                           <span className="font-bold st-text-primary">"{ub.trigger.label}"</span>
                         </div>
@@ -627,6 +719,54 @@ export const ActionCard: React.FC<ActionCardProps> = ({
                     No DataNode triggers reference this action.
                   </div>
                 )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div className="p-2.5 rounded-lg st-code-surface border st-border">
+                  <div className="text-[11px] font-bold st-text-primary mb-1.5">
+                    📤 Multi-Source Data Reads ({multiSourceReadNodeIds.length})
+                  </div>
+                  {multiSourceReadNodeIds.length > 0 ? (
+                    <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+                      {multiSourceReadNodeIds.map((dnId) => (
+                        <button
+                          key={dnId}
+                          type="button"
+                          onClick={() => onJumpToDataNode?.(dnId)}
+                          className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/25 transition-colors"
+                          title="Jump to referenced DataNode"
+                        >
+                          data:{dnId} ↗
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-[11px] st-text-muted italic">None</span>
+                  )}
+                </div>
+
+                <div className="p-2.5 rounded-lg st-code-surface border st-border">
+                  <div className="text-[11px] font-bold st-text-primary mb-1.5">
+                    🔄 Writes / Refreshes DataNodes ({feedbackTargetDataNodes.length})
+                  </div>
+                  {feedbackTargetDataNodes.length > 0 ? (
+                    <div className="flex items-center gap-1.5 flex-wrap font-mono text-[11px]">
+                      {feedbackTargetDataNodes.map((fb) => (
+                        <button
+                          key={`${fb.mode}:${fb.nodeId}`}
+                          type="button"
+                          onClick={() => onJumpToDataNode?.(fb.nodeId)}
+                          className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-colors"
+                          title={`Jump to DataNode (${fb.mode})`}
+                        >
+                          {fb.mode} ➔ data:{fb.nodeId} ↗
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-[11px] st-text-muted italic">None</span>
+                  )}
+                </div>
               </div>
             </div>
           )}

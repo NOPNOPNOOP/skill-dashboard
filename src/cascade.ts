@@ -4,8 +4,11 @@ import YAML from "yaml";
 import {
   type ActionGroup,
   type ActionItem,
+  type BoundActionTrigger,
   type ConfigLayerStatus,
+  type DataNode,
   type FormField,
+  type InlineActionHostMeta,
   type ManifestSymbolProvenance,
   type PartialSkillManifest,
   type SkillEnvVar,
@@ -976,14 +979,193 @@ export function loadAndLinkManifestFile(
 
     const resolved = Object.keys(defs).length > 0 ? resolveDefsRefs(assembled, defs) : assembled;
     const validated = SkillManifestSchema.safeParse(resolved);
+    const outManifest = validated.success ? validated.data : (resolved as PartialSkillManifest);
+    normalizeManifestDataAndInlineActions(outManifest, provenance);
     return {
-      manifest: validated.success ? validated.data : (resolved as PartialSkillManifest),
+      manifest: outManifest,
       rawParsed: resolved,
       provenance,
     };
   } catch {
     return { manifest: null, rawParsed: null, provenance };
   }
+}
+
+export function synthesizeInlineActionId(
+  nodeId: string,
+  slot: InlineActionHostMeta["slot"],
+  idx: number,
+  trigger: { id?: string; label?: string }
+): string {
+  if (trigger.id && trigger.id.trim()) return trigger.id.trim();
+  const slug =
+    (trigger.label || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || `item-${idx}`;
+  return `inline:${nodeId}:${slot}:${slug}`;
+}
+
+export function normalizeDataNodeCategoryAndSubgroup(node: DataNode): DataNode {
+  if (!node || typeof node !== "object") return node;
+  const rawCat = (node.category || "").trim();
+  if (!node.subgroup && rawCat.includes("/")) {
+    const [c, ...rest] = rawCat.split("/");
+    return {
+      ...node,
+      category: (c || "").trim() || node.category,
+      subgroup: rest.join("/").trim() || undefined,
+    };
+  }
+  return node;
+}
+
+export function normalizeManifestDataAndInlineActions(
+  manifest: PartialSkillManifest | SkillManifest | null | undefined,
+  provenance?: ManifestSymbolProvenance
+): void {
+  if (!manifest || !Array.isArray(manifest.data)) return;
+
+  const existingActions = new Map<string, ActionItem>();
+  for (const grp of manifest.actionGroups || []) {
+    for (const act of grp.actions || []) {
+      if (act?.id) existingActions.set(act.id, act);
+    }
+    for (const sg of grp.subgroups || []) {
+      for (const act of sg.actions || []) {
+        if (act?.id) existingActions.set(act.id, act);
+      }
+    }
+  }
+
+  const inlineActionsToRegister: ActionItem[] = [];
+
+  const processTrigger = (
+    node: DataNode,
+    slot: InlineActionHostMeta["slot"],
+    idx: number,
+    tr: BoundActionTrigger | undefined
+  ): BoundActionTrigger | undefined => {
+    if (!tr || typeof tr !== "object") return tr;
+    const hasInlineExec = Boolean(
+      (tr.command && tr.command.trim()) || (tr.script && tr.script.trim())
+    );
+    if (!hasInlineExec && tr.actionId) {
+      return tr;
+    }
+    if (hasInlineExec) {
+      const synthId =
+        tr.actionId && tr.actionId.trim()
+          ? tr.actionId.trim()
+          : synthesizeInlineActionId(node.id, slot, idx, tr);
+      tr.actionId = synthId;
+      if (!existingActions.has(synthId)) {
+        const synthesized: ActionItem = {
+          id: synthId,
+          title: tr.title || tr.label,
+          subgroup: `Inline · ${node.title || node.id}`,
+          description: tr.description || `Inline ${slot} action on ${node.title || node.id}`,
+          intermediate: true,
+          inlineHost: {
+            nodeId: node.id,
+            nodeTitle: node.title,
+            slot,
+            label: tr.label,
+          },
+          danger: tr.danger || "safe",
+          requiresHumanApprovalFlag: tr.requiresHumanApprovalFlag,
+          interactive: tr.interactive,
+          defaultRunner: tr.defaultRunner || "web_terminal",
+          cwd: tr.cwd,
+          python: tr.python,
+          envFile: tr.envFile,
+          env: tr.env,
+          command: tr.script || tr.command || "",
+          script: tr.script,
+          form: tr.form,
+          preconditions: tr.preconditions,
+          artifacts: tr.artifacts,
+          output: tr.output,
+        };
+        existingActions.set(synthId, synthesized);
+        inlineActionsToRegister.push(synthesized);
+        if (provenance) {
+          const srcFile = provenance.dataSource?.[node.id] || "manifest.yaml";
+          provenance.actionSource[synthId] = srcFile;
+          provenance.actions[synthId] = { file: srcFile, group: "Inline Bound Actions" };
+        }
+      }
+    }
+    return tr;
+  };
+
+  manifest.data = manifest.data.map((rawNode) => {
+    const node = normalizeDataNodeCategoryAndSubgroup(rawNode);
+    if (Array.isArray(node.quickActions)) {
+      node.quickActions = node.quickActions.map(
+        (tr, idx) => processTrigger(node, "quick", idx, tr)!
+      );
+    }
+    if (Array.isArray(node.rowActions)) {
+      node.rowActions = node.rowActions.map((tr, idx) => processTrigger(node, "row", idx, tr)!);
+    }
+    if (Array.isArray(node.bulkActions)) {
+      node.bulkActions = node.bulkActions.map((tr, idx) => processTrigger(node, "bulk", idx, tr)!);
+    }
+    if (node.cellAction) {
+      node.cellAction = processTrigger(node, "cell", 0, node.cellAction);
+    }
+    if (Array.isArray(node.nodeActions)) {
+      node.nodeActions = node.nodeActions.map((tr, idx) => processTrigger(node, "node", idx, tr)!);
+    }
+    return node;
+  });
+
+  if (inlineActionsToRegister.length > 0) {
+    if (!Array.isArray(manifest.actionGroups) || manifest.actionGroups.length === 0) {
+      manifest.actionGroups = [
+        normalizeGroupSubgroups({
+          name: "Inline Bound Actions",
+          actions: inlineActionsToRegister,
+        }),
+      ];
+    } else {
+      const inlineGrp = manifest.actionGroups.find((g) => g.name === "Inline Bound Actions");
+      if (inlineGrp) {
+        inlineGrp.actions = [...(inlineGrp.actions || []), ...inlineActionsToRegister];
+      } else {
+        manifest.actionGroups.push(
+          normalizeGroupSubgroups({
+            name: "Inline Bound Actions",
+            actions: inlineActionsToRegister,
+          })
+        );
+      }
+    }
+  }
+}
+
+export function getAllSkillActions(manifest: SkillManifest | PartialSkillManifest): ActionItem[] {
+  const seen = new Map<string, ActionItem>();
+  for (const grp of manifest.actionGroups || []) {
+    for (const act of grp.actions || []) {
+      if (act?.id && !seen.has(act.id)) seen.set(act.id, act);
+    }
+    for (const sg of grp.subgroups || []) {
+      for (const act of sg.actions || []) {
+        if (act?.id && !seen.has(act.id)) seen.set(act.id, act);
+      }
+    }
+  }
+  return [...seen.values()];
+}
+
+export function findSkillAction(
+  manifest: SkillManifest | PartialSkillManifest,
+  actionId: string | undefined
+): ActionItem | undefined {
+  if (!actionId) return undefined;
+  return getAllSkillActions(manifest).find((a) => a.id === actionId);
 }
 
 function readManifestFile(filePath: string): PartialSkillManifest | null {
@@ -1055,6 +1237,7 @@ export function resolveSkillCascade(
   if (companionPatch) effective = mergeManifestLayer(effective, companionPatch);
   if (globalPatch) effective = mergeManifestLayer(effective, globalPatch);
   if (workspacePatch) effective = mergeManifestLayer(effective, workspacePatch);
+  normalizeManifestDataAndInlineActions(effective, companionLinked.provenance);
 
   return {
     manifest: effective,

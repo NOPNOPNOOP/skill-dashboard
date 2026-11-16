@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
 import {
+  buildSkillReactiveArchitecture,
   inferDataPrimitive,
   interpolateBoundTriggerArgs,
   projectRecordsToGraph,
@@ -3179,6 +3180,265 @@ actionGroups:
       expect(previewAdhoc.cwd).toBe(customWs);
       expect(previewAdhoc.resolvedEnv.isCustom).toBe(true);
       expect(previewAdhoc.resolvedEnv.customEnvKeys).toContain("RUNBOOK_FLAG");
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  test("20. Clickable Data Subgroups, 100% Isomorphic Inline & intermediate Actions, 4-Layer Multi-Source focusScope, Bidirectional Selective Refresh (refreshAfterActions ⇌ output.refreshData), and 4-Swimlane Reactive Architecture Graph", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-isomorphic-"));
+    const agentsDir = join(tmpBase, ".agents/skills");
+    mkdirSync(agentsDir, { recursive: true });
+    const repoSkillPath = resolve(import.meta.dir, "../skills/skill-dashboard");
+    symlinkSync(repoSkillPath, join(agentsDir, "skill-dashboard"));
+
+    const isoSkillDir = join(agentsDir, "iso-lab");
+    mkdirSync(join(isoSkillDir, ".dashboard"), { recursive: true });
+    const stateDir = join(tmpBase, "state");
+    mkdirSync(stateDir, { recursive: true });
+    const counterSlowPath = join(stateDir, "slow_count.txt");
+    const counterFastPath = join(stateDir, "fast_count.txt");
+    writeFileSync(counterSlowPath, "0", "utf-8");
+    writeFileSync(counterFastPath, "0", "utf-8");
+
+    writeFileSync(
+      join(isoSkillDir, "SKILL.md"),
+      `---\nname: iso-lab\ndescription: Isomorphic Action & Architecture Lab\n---\n# Iso Lab\n`
+    );
+
+    const isoManifest = `
+id: iso-lab
+name: Isomorphic Action & Architecture Lab
+category: Engineering Tools
+description: Verifies subgroup, inline actions, 4-layer focusScope, selective refresh, and reactive architecture graph
+context:
+  - key: target_env
+    label: "Target Env"
+    type: select
+    default: "uat"
+    options:
+      - { label: "UAT", value: "uat" }
+      - { label: "PROD", value: "prod" }
+data:
+  - id: slow-unrelated-probe
+    title: "Slow Unrelated Probe"
+    category: "1. Probes"
+    subgroup: "1.1 Unrelated"
+    runtime: ts
+    prelude: true
+    shape: kv
+    code: |
+      const p = "${counterSlowPath}";
+      const cur = Number(fs.readFileSync(p, "utf-8").trim() || "0") + 1;
+      fs.writeFileSync(p, String(cur), "utf-8");
+      return { calls: cur, region: "us-west-2" };
+
+  - id: fast-source-raw
+    title: "Fast Source Raw"
+    category: "1. Probes"
+    subgroup: "1.2 Fast State"
+    intermediate: true
+    runtime: ts
+    prelude: true
+    shape: table
+    sync:
+      refreshAfterActions:
+        - "mut-*"
+    code: |
+      const p = "${counterFastPath}";
+      const cur = Number(fs.readFileSync(p, "utf-8").trim() || "0") + 1;
+      fs.writeFileSync(p, String(cur), "utf-8");
+      return [
+        { id: "svc_alpha", owner: "core", calls: cur },
+        { id: "svc_beta", owner: "data", calls: cur }
+      ];
+
+  - id: services-view-table
+    title: "Services View Table"
+    category: "2. Operations / 2.1 Services"
+    runtime: ts
+    prelude: true
+    shape: table
+    primaryKey: id
+    selectContextKey: target_env
+    sync:
+      dependsOn:
+        - "fast-source-raw"
+    rowActions:
+      - label: "Inline Audit"
+        command: "echo row={{row.id}} owner={{row.owner}} total={{self.count}} region={{data.slow-unrelated-probe.region}} env={{context.target_env}} {{form.extra_flag}}"
+        danger: safe
+        form:
+          - key: extra_flag
+            label: "Extra Flag"
+            type: boolean
+            flag: "--verbose"
+            default: true
+        output:
+          intoData: "inline-audit-log"
+          refreshData:
+            - "fast-source-raw"
+      - label: "Helper Ref"
+        actionId: internal-helper-act
+        args:
+          svc: "{{row.id}}"
+    code: |
+      return ctx.data["fast-source-raw"] || [];
+
+  - id: inline-audit-log
+    title: "Inline Audit Log"
+    category: "2. Operations"
+    subgroup: "2.2 Logs"
+    runtime: passive
+    shape: raw
+
+actionGroups:
+  - name: "Service Actions"
+    actions:
+      - id: mut-bump
+        title: "Mutate Fast State"
+        danger: safe
+        command: "echo bumping"
+      - id: internal-helper-act
+        title: "Internal Helper Action"
+        intermediate: true
+        danger: safe
+        command: "echo helper {{form.svc}}"
+        form:
+          - key: svc
+            label: "Service"
+            type: select
+            fromData: "services-view-table"
+            positional: true
+            required: true
+`;
+    writeFileSync(join(isoSkillDir, ".dashboard/manifest.yaml"), isoManifest.trim() + "\n");
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: tmpBase,
+      homeDir: tmpBase,
+    });
+
+    try {
+      // 1. Verify bootstrap includes normalized inline action, subgroup, and intermediate action
+      const bootRes = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+      const isoSkill = bootRes.skills.find((s: any) => s.id === "iso-lab");
+      expect(isoSkill).toBeDefined();
+      expect(validateSkillManifest3Tier(isoSkill)).toEqual([]);
+
+      const svcNode = isoSkill.manifest.data.find((d: any) => d.id === "services-view-table");
+      const inlineTrigger = svcNode.rowActions[0];
+      expect(inlineTrigger.actionId).toBe("inline:services-view-table:row:inline-audit");
+
+      const helperAct = isoSkill.manifest.actionGroups[0].actions.find(
+        (a: any) => a.id === "internal-helper-act"
+      );
+      expect(helperAct.intermediate).toBe(true);
+
+      // 2. Evaluate all data nodes once and verify initial counters and subgroup metadata
+      const initData = (await (await fetch(`${srv.url}/api/skills/iso-lab/data`)).json()) as any;
+      expect(initData.snapshots["slow-unrelated-probe"].subgroup).toBe("1.1 Unrelated");
+      expect(initData.snapshots["slow-unrelated-probe"].value.record.calls).toBe(1);
+      expect(initData.snapshots["fast-source-raw"].value.rows[0].calls).toBe(1);
+      expect(initData.snapshots["services-view-table"].value.rows[0].calls).toBe(1);
+
+      // 3. Preview the inline action with focusScope (L1 Context + L2 Multi-Source Data + L3 Form + L4 FocusScope: self & row)
+      const prevInline = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "iso-lab",
+            actionId: "inline:services-view-table:row:inline-audit",
+            formValues: { extra_flag: true },
+            focusScope: {
+              hostNodeId: "services-view-table",
+              row: { id: "svc_alpha", owner: "core" },
+            },
+          }),
+        })
+      ).json()) as any;
+      expect(prevInline.maskedCommand).toBe(
+        "echo row=svc_alpha owner=core total=2 region=us-west-2 env=uat --verbose"
+      );
+
+      // 4. Execute the inline action with focusScope and verify:
+      //    - output.intoData populates "inline-audit-log"
+      //    - output.refreshData selectively invalidates "fast-source-raw" and downstream "services-view-table"
+      //    - "slow-unrelated-probe" is NOT invalidated (its calls counter stays at 1!)
+      const runInline = (await (
+        await fetch(`${srv.url}/api/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "iso-lab",
+            actionId: "inline:services-view-table:row:inline-audit",
+            formValues: { extra_flag: true },
+            focusScope: {
+              hostNodeId: "services-view-table",
+              row: { id: "svc_alpha", owner: "core" },
+            },
+            runner: "web_terminal",
+          }),
+        })
+      ).json()) as any;
+      expect(runInline.runId).toBeDefined();
+
+      for (let i = 0; i < 40; i++) {
+        const b = (await (await fetch(`${srv.url}/api/bootstrap`)).json()) as any;
+        const r = b.runs.find((x: any) => x.id === runInline.runId);
+        if (r && r.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 80));
+      }
+
+      const afterInlineData = (await (
+        await fetch(`${srv.url}/api/skills/iso-lab/data`)
+      ).json()) as any;
+      expect(afterInlineData.snapshots["inline-audit-log"].status).toBe("ready");
+      expect(afterInlineData.snapshots["inline-audit-log"].stdout).toContain(
+        "row=svc_alpha owner=core total=2 region=us-west-2 env=uat --verbose"
+      );
+      // Fast source & its downstream view table were selectively refreshed (calls: 1 -> 2)
+      expect(afterInlineData.snapshots["fast-source-raw"].value.rows[0].calls).toBe(2);
+      expect(afterInlineData.snapshots["services-view-table"].value.rows[0].calls).toBe(2);
+      // Slow unrelated probe stayed cached (calls === 1)!
+      expect(afterInlineData.snapshots["slow-unrelated-probe"].value.record.calls).toBe(1);
+
+      // 5. Verify buildSkillReactiveArchitecture produces 4 semantic swimlanes and full cyclic blast radius
+      const arch = buildSkillReactiveArchitecture(
+        isoSkill.manifest,
+        afterInlineData.snapshots,
+        isoSkill.layers?.provenance
+      );
+      const ctxNode = arch.nodes.find((n) => n.id === "context:target_env")!;
+      const srcNode = arch.nodes.find((n) => n.id === "data:fast-source-raw")!;
+      const viewNode = arch.nodes.find((n) => n.id === "data:services-view-table")!;
+      const inlineActNode = arch.nodes.find(
+        (n) => n.id === "action:inline:services-view-table:row:inline-audit"
+      )!;
+      expect(ctxNode.layer).toBe(0);
+      expect(srcNode.layer).toBe(1);
+      expect(viewNode.layer).toBe(2);
+      expect(inlineActNode.layer).toBe(3);
+      expect(viewNode.upstreamIds).toContain("data:fast-source-raw");
+      expect(viewNode.downstreamIds).toContain(
+        "action:inline:services-view-table:row:inline-audit"
+      );
+      expect(
+        arch.edges.some(
+          (e) =>
+            e.source === "action:inline:services-view-table:row:inline-audit" &&
+            e.target === "data:fast-source-raw" &&
+            e.kind === "feedback"
+        )
+      ).toBe(true);
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

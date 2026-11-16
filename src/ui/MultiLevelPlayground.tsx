@@ -13,6 +13,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import type {
   ActionGroup,
   ActionItem,
+  BindingFocusScope,
   CanonicalSkill,
   CommandEnvConfig,
   ContextField,
@@ -41,6 +42,7 @@ interface MultiLevelPlaygroundProps {
     adHocCommand?: string;
     adHocTitle?: string;
     formValues?: Record<string, unknown>;
+    focusScope?: BindingFocusScope;
     runner: "web_terminal" | "external_terminal";
     terminalApp?: "Terminal" | "iTerm";
     humanApproved?: boolean;
@@ -74,16 +76,57 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [focusedActionId, setFocusedActionId] = useState<string | null>(null);
   const [highlightedActionId, setHighlightedActionId] = useState<string | null>(null);
+  const [showIntermediateActions, setShowIntermediateActions] = useState<boolean>(false);
+  const [jumpDataNodeRequest, setJumpDataNodeRequest] = useState<{
+    nodeId: string;
+    seq: number;
+  } | null>(null);
   const [sharedSnapshots, setSharedSnapshots] = useState<Record<string, DataSnapshot>>({});
   const [layoutMode, setLayoutMode] = useState<"hierarchy" | "cards">(
     isComplexSkill ? "hierarchy" : "cards"
   );
 
+  const intermediateActionCount = useMemo(() => {
+    const seen = new Set<string>();
+    for (const g of actionGroups) {
+      for (const a of g.actions || []) {
+        if (a.intermediate || a.inlineHost) seen.add(a.id);
+      }
+      for (const sg of g.subgroups || []) {
+        for (const a of sg.actions || []) {
+          if (a.intermediate || a.inlineHost) seen.add(a.id);
+        }
+      }
+    }
+    return seen.size;
+  }, [actionGroups]);
+
+  const effectiveActionGroups = useMemo(() => {
+    if (showIntermediateActions) return actionGroups;
+    return actionGroups
+      .map((g) => {
+        const filteredActions = (g.actions || []).filter((a) => !a.intermediate && !a.inlineHost);
+        const filteredSubgroups = (g.subgroups || [])
+          .map((sg) => ({
+            ...sg,
+            actions: (sg.actions || []).filter((a) => !a.intermediate && !a.inlineHost),
+          }))
+          .filter((sg) => sg.actions.length > 0);
+        return {
+          ...g,
+          actions: filteredActions,
+          subgroups: filteredSubgroups.length > 0 ? filteredSubgroups : undefined,
+        };
+      })
+      .filter((g) => g.actions.length > 0 || (g.subgroups && g.subgroups.length > 0));
+  }, [actionGroups, showIntermediateActions]);
+
   useEffect(() => {
     setSelectedGroup(null);
     setSelectedSubgroup(null);
+    setShowIntermediateActions(false);
     setExpandedGroups(new Set(actionGroups.map((g) => g.name)));
-    const firstAction = actionGroups[0]?.actions?.[0];
+    const firstAction = actionGroups[0]?.actions?.find((a) => !a.intermediate && !a.inlineHost) || actionGroups[0]?.actions?.[0];
     setFocusedActionId(firstAction?.id || null);
     setLayoutMode(totalActionCount > 4 || actionGroups.length > 1 ? "hierarchy" : "cards");
   }, [skillId, totalActionCount, actionGroups.length]);
@@ -91,6 +134,12 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   // Handle Prefill Jump from HTML App View, Docs, or "Locate in Playground"
   useEffect(() => {
     if (!prefillRequest) return;
+    const targetAct = actionGroups
+      .flatMap((g) => [...(g.actions || []), ...(g.subgroups?.flatMap((sg) => sg.actions) || [])])
+      .find((a) => a.id === prefillRequest.actionId);
+    if (targetAct && (targetAct.intermediate || targetAct.inlineHost)) {
+      setShowIntermediateActions(true);
+    }
     setSelectedGroup(null);
     setSelectedSubgroup(null);
     setFocusedActionId(prefillRequest.actionId);
@@ -113,7 +162,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
   }, [prefillRequest?.seq]);
 
   const visibleGroups = useMemo(() => {
-    return actionGroups
+    return effectiveActionGroups
       .filter((g) => !selectedGroup || g.name === selectedGroup)
       .map((g) => {
         const rawSubgroups: ActionGroup[] =
@@ -129,7 +178,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
           resolvedSubgroups: filteredSubgroups,
         };
       });
-  }, [actionGroups, selectedGroup, selectedSubgroup]);
+  }, [effectiveActionGroups, selectedGroup, selectedSubgroup]);
 
   const toggleGroupExpand = (groupName: string) => {
     setExpandedGroups((prev) => {
@@ -184,6 +233,8 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
         activeWorkspace={activeWorkspace}
         refreshTrigger={refreshTrigger}
         commandEnvOverrides={commandEnvOverrides}
+        skillProvenance={skillProvenance}
+        jumpDataNodeRequest={jumpDataNodeRequest}
         onSkillUpdated={onSkillUpdated}
         onContextChanged={() => onContextChanged?.()}
         onSnapshotsChanged={setSharedSnapshots}
@@ -191,7 +242,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
           onPrefillJump(actionId, formValues);
         }}
         onExecute={onExecute}
-        onExecuteBoundTrigger={async ({ actionId, mode, formValues }) => {
+        onExecuteBoundTrigger={async ({ actionId, mode, formValues, focusScope }) => {
           const targetAction = allActionsMap.get(actionId);
           // If mode is prefill or the target action has warn/danger approval gate, jump to the action form with prefill!
           if (
@@ -206,6 +257,7 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
           await onExecute({
             actionId,
             formValues,
+            focusScope,
             runner: "web_terminal",
             humanApproved: false,
           });
@@ -214,28 +266,49 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
 
       {/* Simple Clean Mode for Small Skills (1-4 actions) */}
       {!isComplexSkill ? (
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {actionGroups
-            .flatMap((g) => g.actions || [])
-            .map((action) => (
-              <ActionCard
-                key={action.id}
-                skillId={skillId}
-                action={action}
-                activeWorkspace={activeWorkspace}
-                refreshTrigger={refreshTrigger}
-                prefillValues={
-                  prefillRequest?.actionId === action.id ? prefillRequest.formValues : null
-                }
-                uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
-                dataSnapshots={sharedSnapshots}
-                dataNodes={dataNodes}
-                actionProvenance={skillProvenance?.actionSource?.[action.id]}
-                onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
-                onSkillUpdated={onSkillUpdated}
-                onExecute={onExecute}
-              />
-            ))}
+        <div className="flex flex-col gap-3">
+          {intermediateActionCount > 0 && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowIntermediateActions((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold transition-all border ${
+                  showIntermediateActions
+                    ? "bg-amber-500/15 border-amber-500/50 text-amber-700 dark:text-amber-300 shadow-sm"
+                    : "st-btn-secondary border-transparent"
+                }`}
+                title="Show/hide intermediate & inline helper actions"
+              >
+                <span>🔬 Intermediates ({intermediateActionCount})</span>
+              </button>
+            </div>
+          )}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {effectiveActionGroups
+              .flatMap((g) => g.actions || [])
+              .map((action) => (
+                <ActionCard
+                  key={action.id}
+                  skillId={skillId}
+                  action={action}
+                  activeWorkspace={activeWorkspace}
+                  refreshTrigger={refreshTrigger}
+                  prefillValues={
+                    prefillRequest?.actionId === action.id ? prefillRequest.formValues : null
+                  }
+                  uiEnvOverride={commandEnvOverrides?.[`action:${action.id}`]}
+                  dataSnapshots={sharedSnapshots}
+                  dataNodes={dataNodes}
+                  actionProvenance={skillProvenance?.actionSource?.[action.id]}
+                  onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
+                  onJumpToDataNode={(nodeId) =>
+                    setJumpDataNodeRequest({ nodeId, seq: Date.now() })
+                  }
+                  onSkillUpdated={onSkillUpdated}
+                  onExecute={onExecute}
+                />
+              ))}
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
@@ -246,27 +319,43 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                 <FolderTree className="w-4 h-4 text-sky-500" />
                 <span>Action Hierarchy</span>
               </span>
-              <div className="inline-flex rounded-lg p-0.5 st-surface-muted border st-border">
-                <button
-                  type="button"
-                  onClick={() => setLayoutMode("hierarchy")}
-                  className={`p-1 rounded ${
-                    layoutMode === "hierarchy" ? "bg-sky-600 text-white" : "st-text-muted"
-                  }`}
-                  title="Compact Multi-Level Accordion View (High Density)"
-                >
-                  <ListTree className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLayoutMode("cards")}
-                  className={`p-1 rounded ${
-                    layoutMode === "cards" ? "bg-sky-600 text-white" : "st-text-muted"
-                  }`}
-                  title="Expanded Card View"
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" />
-                </button>
+              <div className="flex items-center gap-1">
+                {intermediateActionCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowIntermediateActions((prev) => !prev)}
+                    className={`px-1.5 py-0.5 rounded-lg text-[10.5px] font-mono font-semibold border transition-colors ${
+                      showIntermediateActions
+                        ? "bg-amber-500/15 border-amber-500/50 text-amber-700 dark:text-amber-300"
+                        : "st-btn-secondary border-transparent"
+                    }`}
+                    title="Show/hide intermediate & inline helper actions"
+                  >
+                    🔬 +{intermediateActionCount}
+                  </button>
+                )}
+                <div className="inline-flex rounded-lg p-0.5 st-surface-muted border st-border">
+                  <button
+                    type="button"
+                    onClick={() => setLayoutMode("hierarchy")}
+                    className={`p-1 rounded ${
+                      layoutMode === "hierarchy" ? "bg-sky-600 text-white" : "st-text-muted"
+                    }`}
+                    title="Compact Multi-Level Accordion View (High Density)"
+                  >
+                    <ListTree className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLayoutMode("cards")}
+                    className={`p-1 rounded ${
+                      layoutMode === "cards" ? "bg-sky-600 text-white" : "st-text-muted"
+                    }`}
+                    title="Expanded Card View"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -283,11 +372,13 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
               }`}
             >
               <span>All Action Groups</span>
-              <span className="text-xs font-mono opacity-80">{totalActionCount}</span>
+              <span className="text-xs font-mono opacity-80">
+                {effectiveActionGroups.reduce((acc, g) => acc + (g.actions?.length || 0), 0)}
+              </span>
             </button>
 
             <div className="space-y-1 max-h-[55vh] overflow-y-auto overscroll-contain pr-0.5">
-              {actionGroups.map((grp) => {
+              {effectiveActionGroups.map((grp) => {
                 const isGroupSelected = selectedGroup === grp.name && selectedSubgroup === null;
                 const isExpanded = expandedGroups.has(grp.name);
                 const subgroups = grp.subgroups || [];
@@ -420,6 +511,9 @@ export const MultiLevelPlayground: React.FC<MultiLevelPlaygroundProps> = ({
                               dataNodes={dataNodes}
                               actionProvenance={skillProvenance?.actionSource?.[action.id]}
                               onTriggerFixAction={(fixId) => onPrefillJump(fixId, {})}
+                              onJumpToDataNode={(nodeId) =>
+                                setJumpDataNodeRequest({ nodeId, seq: Date.now() })
+                              }
                               onSkillUpdated={onSkillUpdated}
                               onExecute={onExecute}
                             />

@@ -80,6 +80,7 @@ actionGroups: [] # Detailed below
 | `id` | `string` | Required | Unique action ID across the manifest (used in deep links `/?id=<unit>&action=<id>`, `rowActions`, `data-sd-action`, and `danger` confirmation). |
 | `title` | `string` | Required | Human-readable title displayed on the card/row. |
 | `subgroup` | `string` | Optional | Second-level tree grouping (e.g. `"1.2 Snapshots & Backups"`). |
+| `intermediate` | `boolean` | `false` | Set `true` for internal/reusable helper actions hidden by default from the main Playground list and toggleable via `🔬 Intermediates (N)`. |
 | `description` | `string` | Optional | Concise explanation of what the operation does. |
 | `danger` | `"safe" \| "warn" \| "danger"` | `"safe"` | `safe` runs immediately (and enables `▶ Quick Run` when required fields have defaults); `warn` opens a confirmation modal; `danger` requires typing the exact `action.id` string to unlock. |
 | `requiresHumanApprovalFlag` | `string` | Optional | E.g. `"--human-approved"`. Appended to the command **only** after the user explicitly approves the confirmation modal in the browser. |
@@ -92,8 +93,9 @@ actionGroups: [] # Detailed below
 | `command` | `string` | Required* | Single-line or multi-line command template (*or use `script: \|`). |
 | `script` | `string` | Optional | Multi-line shell script executed in an isolated temporary `/bin/zsh` file with `set -e` enabled. |
 | `form` | `FormField[]` | `[]` | Typed parameter inputs rendered in the Action Card. |
+| `preconditions` | `ActionPrecondition[]` | `[]` | Declarative data-state guards evaluated against live `DataNode` snapshots (`dataNodeId`, `minRows`, `equals`, `contains`, `notEmpty`, `message`, `fixActionId`). |
 | `artifacts` | `Array<string \| ArtifactRule>` | `[]` | Post-run artifact extraction & preview/download rules (see Section 7). |
-| `output` | `ActionOutputSpec` | Optional | Pipes stdout back into a reactive `DataNode` (`intoData: "<nodeId>"`). |
+| `output` | `ActionOutputSpec` | Optional | Pipes stdout back into a reactive `DataNode` (`intoData: "<nodeId>"`) and/or selectively invalidates target `DataNode`s (`refreshData: ["<nodeId>"]`). |
 
 ---
 
@@ -112,8 +114,10 @@ All `command`, `script`, `DataNode.command`, and `ArtifactRule.path` strings sup
 | `{{cache_dir}}` | `$SD_CACHE_DIR` | `~/.cache/skill-dashboard/units/<unit_id>` — disposable per-unit cache directory. |
 | `{{artifacts_dir}}` | `$SD_ARTIFACTS_DIR` | `~/.local/share/skill-dashboard/artifacts/<unit_id>/<run_id>` during execution (and `.../latest` symlink during preview). Any file written here is automatically collected as a run artifact! |
 | `{{context.<key>}}` | — | Current value of the global reactive `context` switcher `<key>`. |
-| `{{data.<nodeId>.*}}` | — | Deep path into a reactive `DataNode` snapshot (e.g. `{{data.backups.rows.0.name}}`). |
+| `{{data.<nodeId>.*}}` | — | Deep path into any reactive `DataNode` snapshot (e.g. `{{data.backups.rows.0.name}}`). |
 | `{{form.<key>}}` | — | Value of the `FormField` with `key: <key>` (see auto-binding rules below). |
+| `{{self}}` / `{{self.<path>}}` | — | Host `DataNode` snapshot value (e.g. `{{self.count}}` for row/item count) when triggered from a `DataNode`. |
+| `{{row.<col>}}` / `{{node.<key>}}` / `{{cell.<key>}}` / `{{selected.<col>}}` | — | L4 Host Focus Scope variables injected when triggered from a `DataNode` row, tree/graph node, matrix cell, or bulk selection. |
 
 ### `{{form.<key>}}` Flag Auto-Binding Rules
 1. **Named Flag (`flag: "--env"`, `positional` not `true`)**:

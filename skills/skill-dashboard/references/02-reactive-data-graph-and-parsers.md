@@ -56,9 +56,9 @@ interface DataExecutionContext {
 
 > **Note on In-Scope Variables in TypeScript**: `executeInlineTypeScript` (`runtime: ts` and `transform: ts`) automatically exposes `{ input, rawStdout, context, data, nodes }` at the top level alongside `ctx`. You can reference `data["<upstream_id>"]` or `context["<key>"]` directly or via `ctx.data` / `ctx.context`.
 
-### Node Categorization & Upstream Intermediate DAG Nodes (`category` & `intermediate`)
+### Node Categorization, Subgroups & Upstream Intermediate DAG Nodes (`category`, `subgroup`, & `intermediate`)
 
-- **`category?: string`**: Groups `DataNode`s into filterable category tabs in the Studio Data Panel (e.g. `"1. Document Extraction"`, `"2. Extraction Config"`). Users can quickly switch between functional domains in complex skills.
+- **`category?: string` & `subgroup?: string`**: Groups `DataNode`s into a 4-level clickable **Data Hierarchy Tree (`All Data Nodes` $\rightarrow$ `📁 Category` $\rightarrow$ `📂 Subgroup` $\rightarrow$ `📄 DataNode`)** in the Studio Data Panel (also supports `/` separation inside `category: "1. Ecosystem / 1.1 Catalog"`). Clicking a `Category` or `Subgroup` header displays all `DataNode`s under that scope on the right canvas.
 - **`intermediate?: boolean`**: Declares explicit upstream DAG source nodes.
   - **Hidden by default** in the main Data Panel to keep operational dashboards clean and focused on user-facing metrics and tables.
   - **Inspectable via the `🔬 Intermediates` toggle switch** in the Data Panel, complete with reverse `Consumed by: [data:<downstream_id>, ...]` dependency badges.
@@ -223,13 +223,13 @@ sync:
     - "context.target_env"
   watchFiles:                          # Local directories/files watched via debounced fs.watch
     - "{{data_dir}}/backups"
-  invalidateOnActions:                 # Action IDs (or prefix globs "backup-*") that invalidate this node on completion
+  refreshAfterActions:                 # Action IDs (or prefix globs "backup-*") that selectively refresh this node on completion
     - "create-backup"
     - "restore-*"
 ```
 
-### Closing the Loop: `ActionItem.output.intoData`
-Any action can pipe its stdout directly into a `DataNode` (and automatically trigger downstream `dependsOn` nodes):
+### Closing the Loop: `ActionItem.output.intoData` & `ActionItem.output.refreshData`
+Any action (including inline bound actions declared directly inside `rowActions` / `quickActions`) can pipe its stdout directly into a `DataNode` (`intoData`) or selectively refresh target `DataNode`s (`refreshData`):
 ```yaml
 actions:
   - id: scan-candidates
@@ -237,6 +237,8 @@ actions:
     command: "{{python}} {{skill_dir}}/tools/scan.py --json"
     output:
       intoData: "candidates-table"
+      refreshData:
+        - "snapshots-table"
       parse:
         format: json
       shape: table

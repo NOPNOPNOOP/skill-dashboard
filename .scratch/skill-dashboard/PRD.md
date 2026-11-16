@@ -176,6 +176,21 @@ Build **Skill Dashboard Studio** (`skill-dashboard`)—a fast, zero-external-dep
       - **`Split Focus` (Master-Detail Navigator + Pin Split-View)**: Left sidebar directory tree grouped by `category` (showing node title, `Primitive ➔ View` badge, row/item summary, and a **`📌 Pin`** toggle) + Right full-width active canvas that renders pinned node(s) alongside the focused node so Master-Detail (`selectContextKey`) interactions between an upstream table and downstream graph/tree/matrix can be operated side-by-side within a single viewport;
       - **`Accordion` (High-Density Single-Line Rows)**: Collapses each `DataNode` into a single-line summary bar with inline quick actions, expanding on click;
       - **`Grid` (Clean 2-Column Bounded Cards)**: Clean 2-column grid with bounded card body scroll (`max-h-80`) and decluttered headers.
+88. As a user browsing a skill's `DataNode`s, I want the Data Panel's left navigator to provide a **Multi-Level Clickable Data Scope Tree (`All Data Nodes (N)` $\rightarrow$ `📁 Category` $\rightarrow$ `📂 Subgroup` $\rightarrow$ `📄 DataNode`)** that mirrors the Action Hierarchy Tree:
+    - `DataNode`s support an optional `subgroup?: string` (or `/` path separation inside `category: "1. Ecosystem / 1.1 Catalog"`);
+    - Clicking **`All Data Nodes (N)`** displays all visible `DataNode`s on the right canvas;
+    - Clicking a **`📁 Category` header** displays all `DataNode`s belonging to that category on the right canvas (grouped by `subgroup`);
+    - Clicking a **`📂 Subgroup` header** displays all `DataNode`s belonging to that subgroup on the right canvas;
+    - Clicking a single **`📄 DataNode` leaf** focuses that single node on the right canvas;
+    - Any **`📌 Pinned`** node(s) remain anchored at the top of the right canvas across scope selections, while the right canvas header provides a **`↻ Refresh Scope`** button and density switcher (**`Cards` / `Accordion` / `Grid`**) for multi-node scopes.
+89. As a skill author binding actions to `DataNode`s (`quickActions`, `rowActions`, `bulkActions`, `nodeActions`, `cellAction`), I want **100% Isomorphic Inline Actions**, **`ActionItem.intermediate: true`**, and a **4-Layer Multi-Source Data Scope Stack**:
+    - Every `BoundActionTrigger` supports two pure, isomorphic forms: (1) **Ref Mode** (`actionId` referencing a top-level or `intermediate: true` `ActionItem` with optional `args`), or (2) **Inline Mode** (declaring `command` or `script` inline alongside any standard `ActionItem` properties: `cwd`, `python`, `envFile`, `env`, `danger`, `requiresHumanApprovalFlag`, `interactive`, `form`, `preconditions`, `artifacts`, `output`), normalized at load time with a deterministic ID (`inline:<nodeId>:<slot>:<slug(label)>`) and module provenance;
+    - `ActionItem`s marked `intermediate: true` (and synthesized inline actions) are hidden by default from the main Operations Playground list and toggleable via a `🔬 Intermediates (N)` filter switch;
+    - Both Ref and Inline actions resolve templates against the **4-Layer Multi-Source Scope Stack** (`L1 Global & Context {{context.*}}` $\rightarrow$ `L2 Multi-Source Data {{data.<anyNodeId>.*}}` + `fromData` + `preconditions` $\rightarrow$ `L3 Action Form {{form.*}}` $\rightarrow$ `L4 Host Focus Scope {{self}} / {{self.*}} / {{row.*}} / {{node.*}} / {{cell.*}} / {{selected.*}}`), with `focusScope` forwarded through `/api/preview-command`, `/api/runs`, and `BoundActionInspectorModal`.
+90. As a skill author or developer orchestrating `Action ⇌ Data` feedback loops and inspecting symbol lineage, I want:
+    - **Bidirectional Selective Refresh (`sync.refreshAfterActions` $\rightleftharpoons$ `output.refreshData`)**: `DataNode.sync.refreshAfterActions: string[]` (compatible with legacy `invalidateOnActions`) and `ActionItem.output.refreshData: string[]` declare explicit invalidation edges so `ReactiveGraphEngine.onActionCompleted` selectively invalidates and recomputes only the targeted `DataNode`s and their downstream `dependsOn` subgraph without thundering-herd re-evaluation of unrelated slow probes;
+    - **Holistic 4-Tab `DataNode` `🔍 Inspect` & Bidirectional Jump (`↗ Jump`)**: Upgrades `DataNode` `🔍 Inspect` to 4 white-box tabs—(1) `Source & Provenance` (defining YAML module file, runtime source, telemetry, and `⚙️ Env`), (2) `DAG Lineage & Action Bindings` (upstream `Context`/`DataNode`s, downstream `DataNode`s/`selectContextKey`, hosted `Ref`/`Inline` triggers, multi-source `fromData`/`preconditions`/`{{data.*}}` action consumers, and `intoData`/`refreshData`/`refreshAfterActions` writers with one-click `↗ Jump` to any linked `DataNode` or `ActionCard`), (3) `Views & Payload` (`Primitive ➔ View` specs, normalized payload, raw output), and (4) `Raw Declaration`—paired with symmetric multi-source read and `intoData`/`refreshData` links in `ActionCard`'s `🔍 Inspect`;
+    - **Zero-Config Interactive `🕸️ Context ➔ Data ⇌ Action` Architecture Graph**: A toggleable top-level graph view in the Data Workbench that automatically synthesizes a 4-swimlane directed graph (`0: Context` $\rightarrow$ `1: Source/Intermediate Data` $\rightarrow$ `2: View DataNodes` $\rightarrow$ `3: Actions`), renders forward data/trigger flows as solid curves and `intoData`/`refreshData`/`selectContextKey` feedback loops as dashed arcs, supports edge-kind filtering, highlights full cyclic blast radius on node click, and provides one-click `↗ Jump to Card`.
 
 ---
 
@@ -309,7 +324,8 @@ export interface DataNode {
   id: string;
   title: string;
   description?: string;
-  category?: string;       // optional Data Panel category grouping (e.g. "Document Extraction", "Identity & Roles")
+  category?: string;       // optional Data Panel category grouping (e.g. "1. Ecosystem", or "1. Ecosystem / 1.1 Catalog")
+  subgroup?: string;       // optional second-level Data Panel subgroup (e.g. "1.1 Skills Catalog")
   intermediate?: boolean;  // true for upstream DAG source nodes hidden by default and inspectable via "Show Intermediates" switch
   hidden?: boolean;
   runtime: "zsh" | "ts" | "python" | "sqlite" | "glob" | "file" | "passive";
@@ -390,9 +406,57 @@ export interface DataNode {
     ttlMs?: number;
     dependsOn?: string[];
     watchFiles?: string[];
-    invalidateOnActions?: string[];
+    refreshAfterActions?: string[];     // canonical selective post-action refresh list (supports exact ID or prefix*)
+    invalidateOnActions?: string[];     // legacy alias merged with refreshAfterActions
     pollMs?: number;
     stream?: boolean;
+  };
+}
+
+export interface BindingFocusScope {
+  hostNodeId?: string;
+  row?: Record<string, unknown>;
+  selectedRows?: Record<string, unknown>[];
+  cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
+  node?: {
+    id: string;
+    label?: string;
+    value?: unknown;
+    path?: string;
+    upstreamIds?: string[];
+    downstreamIds?: string[];
+    rawRow?: Record<string, unknown>;
+  };
+}
+
+export interface BoundActionTrigger {
+  id?: string;                          // optional explicit ID; defaults to "inline:<nodeId>:<slot>:<slug(label)>" for inline actions
+  label: string;
+  actionId?: string;                    // Ref Mode: target ActionItem.id (auto-populated for Inline Mode after normalization)
+  mode?: "run" | "prefill";
+  args?: Record<string, unknown>;       // template mapping into formValues (supports {{self.*}}, {{row.*}}, {{node.*}}, {{cell.*}}, {{data.*}}, {{context.*}})
+  // Inline Mode (100% isomorphic with ActionItem):
+  title?: string;
+  description?: string;
+  danger?: "safe" | "warn" | "danger";
+  requiresHumanApprovalFlag?: string;
+  interactive?: boolean;
+  defaultRunner?: "web_terminal" | "external_terminal" | "copy_command" | "copy_agent_prompt";
+  cwd?: "project_root" | "skill_dir" | string;
+  python?: string;
+  envFile?: string;
+  env?: Record<string, string>;
+  command?: string;
+  script?: string;
+  form?: FormField[];
+  preconditions?: ActionPrecondition[];
+  artifacts?: Array<string | ArtifactRule>;
+  output?: {
+    intoData?: string;
+    refreshData?: string[];
+    parse?: DataNode["parse"];
+    transform?: DataNode["transform"];
+    shape?: DataNode["shape"];
   };
 }
 
@@ -413,6 +477,13 @@ export interface ActionItem {
   title: string;
   subgroup?: string;
   description?: string;
+  intermediate?: boolean;             // true for internal/reusable actions hidden from the main Playground list by default
+  inlineHost?: {                      // populated automatically when normalized from an inline BoundActionTrigger
+    nodeId: string;
+    nodeTitle?: string;
+    slot: "quick" | "row" | "bulk" | "cell" | "node";
+    label: string;
+  };
   danger: "safe" | "warn" | "danger";
   requiresHumanApprovalFlag?: string; // e.g. "--human-approved"
   interactive?: boolean;              // true for full-screen TUIs (prompt_toolkit, etc.)
@@ -421,13 +492,14 @@ export interface ActionItem {
   python?: string;
   envFile?: string;
   env?: Record<string, string>;
-  command: string;                    // template supporting {{python}}, {{skill_dir}}, {{project_root}}, {{data_dir}}, {{cache_dir}}, {{artifacts_dir}}, {{context.*}}, {{data.*}}, {{form.*}}
+  command: string;                    // template supporting {{python}}, {{skill_dir}}, {{project_root}}, {{data_dir}}, {{cache_dir}}, {{artifacts_dir}}, {{context.*}}, {{data.*}}, {{form.*}}, {{self.*}}, {{row.*}}, {{node.*}}, {{cell.*}}
   script?: string;                    // multi-line isolated script (`#!/bin/zsh\nset -e`)
   form?: FormField[];
   preconditions?: ActionPrecondition[]; // declarative data-state guards evaluated against live DataSnapshots
   artifacts?: Array<string | ArtifactRule>; // structured 3-channel artifact extraction rules
   output?: {
     intoData?: string;                // pipes parsed action output back into a DataNode
+    refreshData?: string[];           // selectively invalidates and refreshes target DataNodes upon completion
     parse?: DataNode["parse"];
     transform?: DataNode["transform"];
     shape?: DataNode["shape"];
@@ -617,6 +689,11 @@ export interface AgentManifestSyncRequest {
    - Verifies that `DataSnapshot.primitive` resolves accurately to `"Scalar" | "Records" | "Document" | "Graph" | "Raw"`.
    - Verifies that `projectRecordsToMatrix` supports both Long-Table Pivot (`rowKey + colKey + valueKey`) and Wide-Table Attribute Matrix (`rowKey + colKeys` or automatic unique-rowKey detection), `projectRecordsToTree` groups records hierarchically via `treeSpec.groupBy`, and `projectRecordsToGraph` builds a topological graph from `graphSpec.dependsOnKey` / `parentKey`.
    - Verifies that `interpolateBoundTriggerArgs` resolves `{{row.*}}`, `{{node.*}}`, and `{{cell.*}}` interchangeably via `rawRow` across all projected views, and that `/api/preview-command` and `/api/runs` honor `action:adhoc-runbook` command environment overrides set from Markdown executable blocks.
+16. **Multi-Level Clickable Data Scope Tree (`All ➔ Category ➔ Subgroup ➔ Node`), 100% Isomorphic Inline & `intermediate` Actions, 4-Layer Multi-Source Scope (`focusScope`), Bidirectional Selective Refresh (`sync.refreshAfterActions` $\rightleftharpoons$ `output.refreshData`), Holistic 4-Tab DataNode `🔍 Inspect`, and Zero-Config `🕸️ Context ➔ Data ⇌ Action` Architecture Graph**:
+   - Verifies that `BoundActionTriggerSchema` validates both Ref Mode (`actionId`) and Inline Mode (`command` / `script` + isomorphic `ActionItem` fields), synthesizing deterministic IDs (`inline:<nodeId>:<slot>:<slug(label)>`) and module provenance during manifest linking so `/api/preview-command`, `/api/runs`, `PUT /api/skills/:id/command-env`, `manifest-cli validate`, and `manifest-cli map` resolve inline actions identically to top-level actions.
+   - Verifies that `interpolateActionCommand` resolves the 4-layer multi-source scope stack (`{{context.*}}`, `{{data.<anyNodeId>.*}}`, `{{form.*}}`, and `focusScope` `{{self}}`/`{{self.*}}`/`{{row.*}}`/`{{node.*}}`/`{{cell.*}}`/`{{selected.*}}`) with quote-aware escaping across both preview and execution endpoints.
+   - Verifies that `ReactiveGraphEngine.onActionCompleted` selectively invalidates only `DataNode`s matched by `action.output.refreshData` or `node.sync.refreshAfterActions` (plus their downstream `dependsOn` dependents) without invalidating unrelated probes.
+   - Verifies that `buildSkillReactiveArchitecture` produces deterministic 4-swimlane layers (`0: Context`, `1: Source Data`, `2: View Data`, `3: Actions`) and full cyclic blast-radius reachability (`upstreamIds` / `downstreamIds`) even when `Action ➔ Data` feedback loops (`intoData` / `refreshData`) are present.
 
 ---
 

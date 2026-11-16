@@ -3,10 +3,10 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
 import YAML from "yaml";
-import { loadAndLinkManifestFile } from "./cascade.ts";
+import { getAllSkillActions, loadAndLinkManifestFile } from "./cascade.ts";
 import { DashboardDatabase } from "./db.ts";
 import { discoverCanonicalSkills, expandHomePath, getDefaultAgentRoots } from "./discovery.ts";
-import { extractImplicitDependencies } from "./interpolator.ts";
+import { doesActionPatternMatch, extractImplicitDependencies } from "./interpolator.ts";
 import {
   deriveProjectSlug,
   ensureDashboardDirectories,
@@ -97,7 +97,7 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
     };
   }
 
-  const allActions = (skill.manifest.actionGroups || []).flatMap((g) => g.actions || []);
+  const allActions = getAllSkillActions(skill.manifest);
   for (const act of allActions) {
     const imp = extractImplicitDependencies(act.script || act.command || "");
     const deps = new Set<string>();
@@ -117,6 +117,7 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
       runtimeOrShape: act.danger,
       dependsOn: [...deps],
       usedBy: [],
+      intermediate: Boolean(act.intermediate || act.inlineHost),
     };
   }
 
@@ -175,6 +176,20 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
         ctxEntry.usedBy.push(`data:${node.id} (selectContextKey)`);
       }
     }
+    const refreshPatterns = [
+      ...(node.sync?.refreshAfterActions || []),
+      ...(node.sync?.invalidateOnActions || []),
+    ];
+    for (const pat of refreshPatterns) {
+      for (const act of allActions) {
+        if (doesActionPatternMatch(pat, act.id)) {
+          const targetData = symbols[`data:${node.id}`];
+          if (targetData && !targetData.dependsOn.includes(`action:${act.id} (refreshAfterActions)`)) {
+            targetData.dependsOn.push(`action:${act.id} (refreshAfterActions)`);
+          }
+        }
+      }
+    }
   }
 
   for (const act of allActions) {
@@ -182,6 +197,12 @@ export function buildManifestSymbolGraph(skill: CanonicalSkill): ManifestSymbolG
       const targetData = symbols[`data:${act.output.intoData}`];
       if (targetData && !targetData.dependsOn.includes(`action:${act.id} (intoData)`)) {
         targetData.dependsOn.push(`action:${act.id} (intoData)`);
+      }
+    }
+    for (const refId of act.output?.refreshData || []) {
+      const targetData = symbols[`data:${refId}`];
+      if (targetData && !targetData.dependsOn.includes(`action:${act.id} (refreshData)`)) {
+        targetData.dependsOn.push(`action:${act.id} (refreshData)`);
       }
     }
   }
@@ -263,7 +284,7 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
   const prov = linked.provenance;
   const dataIds = new Set((skill.manifest.data || []).map((d) => d.id));
   const contextKeys = new Set((skill.manifest.context || []).map((c) => c.key));
-  const allActions = (skill.manifest.actionGroups || []).flatMap((g) => g.actions || []);
+  const allActions = getAllSkillActions(skill.manifest);
   const actionIds = new Set(allActions.map((a) => a.id));
 
   // L2: Cross-File Symbol Reference Integrity & DAG Cycle Detection
@@ -277,7 +298,7 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
       ...(node.nodeActions || []),
     ];
     for (const tr of triggers) {
-      if (!actionIds.has(tr.actionId)) {
+      if (!tr.actionId || !actionIds.has(tr.actionId)) {
         issues.push({
           level: "L2-Graph",
           severity: "error",
@@ -297,6 +318,19 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
         message: `Data node "${node.id}" declares selectContextKey "${node.selectContextKey}", which does not exist in context.`,
         fixHint: `Available context keys: ${[...contextKeys].join(", ")}`,
       });
+    }
+    for (const pat of node.sync?.refreshAfterActions || []) {
+      const anyMatch = allActions.some((a) => doesActionPatternMatch(pat, a.id));
+      if (!anyMatch && pat !== "*") {
+        issues.push({
+          level: "L2-Graph",
+          severity: "error",
+          file,
+          symbolId: `data:${node.id}`,
+          message: `Data node "${node.id}" sync.refreshAfterActions pattern "${pat}" does not match any action.`,
+          fixHint: `Available action IDs: ${[...actionIds].slice(0, 8).join(", ")}`,
+        });
+      }
     }
   }
 
@@ -332,6 +366,18 @@ export function validateSkillManifest3Tier(skill: CanonicalSkill): ManifestDiagn
         symbolId: `action:${act.id}`,
         message: `Action "${act.id}" pipes output.intoData to non-existent data node "${act.output.intoData}".`,
       });
+    }
+    for (const refId of act.output?.refreshData || []) {
+      if (!dataIds.has(refId)) {
+        issues.push({
+          level: "L2-Graph",
+          severity: "error",
+          file,
+          symbolId: `action:${act.id}`,
+          message: `Action "${act.id}" declares output.refreshData target "${refId}", which does not exist in data nodes.`,
+          fixHint: `Available data node IDs: ${[...dataIds].join(", ")}`,
+        });
+      }
     }
     for (const pre of act.preconditions || []) {
       if (!dataIds.has(pre.dataNodeId)) {

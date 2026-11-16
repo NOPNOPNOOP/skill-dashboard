@@ -74,6 +74,7 @@ data:
     title: "Local Skills Studio Audit ({{context.skill_scope}})"
     description: "Multi-Source Join (`skills-catalog-raw` ⋈ `skills-run-stats-raw`) with Master-Detail click drill-down (`selectContextKey: focus_skill` · `rowActions` · `fromData`)"
     category: "2. Skills & Ecosystem"
+    subgroup: "2.1 Skills Catalog & Matrix"
     runtime: ts
     prelude: true
     shape: table
@@ -121,6 +122,13 @@ data:
       labelKey: "id"
       metaKey: "status"
     rowActions:
+      - label: "Validate"
+        command: "{{manifest_cli}} validate {{row.id}}"
+        cwd: project_root
+        danger: safe
+        output:
+          refreshData:
+            - "ecosystem-health"
       - label: "Symbol Map"
         actionId: manifest-cli-map
         mode: run
@@ -154,6 +162,7 @@ data:
     title: "Multi-Agent Ecosystem Mount Matrix (`shape: matrix`)"
     description: "2D pivot projection of skills × agent ecosystems (`Claude Code`, `Codex/OpenCode/Pi`, `OpenClaw`) with clickable `cellAction` (`shape: matrix`)"
     category: "2. Skills & Ecosystem"
+    subgroup: "2.1 Skills Catalog & Matrix"
     runtime: ts
     prelude: true
     shape: matrix
@@ -232,6 +241,7 @@ data:
     title: "Reactive DAG Lineage & Blast Radius (`shape: graph` · focus: {{context.focus_skill}})"
     description: "Directed topology graph (`context` → `intermediate` → `data` → `action`) with Kahn topological layering, upstream/downstream blast radius, and `nodeActions` (`shape: graph`)"
     category: "2. Skills & Ecosystem"
+    subgroup: "2.2 Symbol Lineage & AST"
     runtime: ts
     prelude: true
     shape: graph
@@ -284,6 +294,7 @@ data:
     title: "Modular `.dashboard/` Symbol Explorer (`shape: tree` · focus: {{context.focus_skill}})"
     description: "Hierarchical tree explorer of `.dashboard/manifest.yaml` and included vertical modules (`shape: tree` · `Expand All / Collapse All` · View Switcher)"
     category: "2. Skills & Ecosystem"
+    subgroup: "2.2 Symbol Lineage & AST"
     runtime: ts
     prelude: true
     shape: tree
@@ -331,6 +342,7 @@ data:
     title: "Last Symbol Map Output (`runtime: passive` · `output.intoData`)"
     description: "Passive data node populated automatically when `manifest-cli-map` runs in the Web Terminal, preserved across global refreshes (`runtime: passive` · `shape: raw`)"
     category: "2. Skills & Ecosystem"
+    subgroup: "2.2 Symbol Lineage & AST"
     runtime: passive
     shape: raw
     quickActions:

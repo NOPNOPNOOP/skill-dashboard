@@ -491,6 +491,7 @@ export const App: React.FC = () => {
     adHocTitle?: string;
     interactiveShell?: boolean;
     formValues?: Record<string, unknown>;
+    focusScope?: Record<string, unknown>;
     runner: "web_terminal" | "external_terminal";
     terminalApp?: "Terminal" | "iTerm";
     humanApproved?: boolean;
@@ -507,6 +508,7 @@ export const App: React.FC = () => {
         interactiveShell: params.interactiveShell,
         keepShellOpen,
         formValues: params.formValues || {},
+        focusScope: params.focusScope,
         runner: params.runner,
         terminalApp: params.terminalApp,
         humanApproved: params.humanApproved,

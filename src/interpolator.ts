@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "path";
 import type {
   ActionItem,
   ActionPrecondition,
+  BindingFocusScope,
   CommandEnvConfig,
   DataNode,
   DataPrimitive,
@@ -17,9 +18,12 @@ import type {
   GraphSpec,
   ListItem,
   ListSpec,
+  ManifestSymbolProvenance,
   MatrixPayload,
   MatrixPivot,
+  PartialSkillManifest,
   ResolvedCommandEnvSummary,
+  SkillManifest,
   TreeNodeItem,
   TreeSpec,
 } from "./types.ts";
@@ -421,9 +425,29 @@ export function resolveDataSnapshotPath(
   return typeof found === "object" ? JSON.stringify(found) : String(found);
 }
 
+export function resolveSelfSnapshotPath(
+  hostSnap: DataSnapshot | undefined,
+  subPath?: string
+): string {
+  if (!hostSnap || hostSnap.value === undefined || hostSnap.value === null) return "";
+  if (!subPath || !subPath.trim()) {
+    return resolveDataSnapshotPath({ __self__: hostSnap }, "__self__");
+  }
+  const clean = subPath.trim();
+  if (clean === "count") {
+    if (Array.isArray(hostSnap.value?.rows)) return String(hostSnap.value.rows.length);
+    if (Array.isArray(hostSnap.value?.items)) return String(hostSnap.value.items.length);
+    if (Array.isArray(hostSnap.value?.nodes)) return String(hostSnap.value.nodes.length);
+    if (Array.isArray(hostSnap.value?.roots)) return String(hostSnap.value.roots.length);
+    if (Array.isArray(hostSnap.rawParsed)) return String(hostSnap.rawParsed.length);
+  }
+  return resolveDataSnapshotPath({ __self__: hostSnap }, `__self__.${clean}`);
+}
+
 export function interpolateBoundTriggerArgs(
   rawArgs: Record<string, unknown> | undefined,
   bindingScope: {
+    hostNodeId?: string;
     row?: Record<string, unknown>;
     selectedRows?: Record<string, unknown>[];
     cell?: { rowKey: string; colKey: string; value: unknown; rawRow?: Record<string, unknown> };
@@ -442,7 +466,16 @@ export function interpolateBoundTriggerArgs(
 ): Record<string, unknown> {
   if (!rawArgs) return {};
   const out: Record<string, unknown> = {};
-  const { row, selectedRows, cell, node, contextValues = {}, dataSnapshots = {} } = bindingScope;
+  const {
+    hostNodeId,
+    row,
+    selectedRows,
+    cell,
+    node,
+    contextValues = {},
+    dataSnapshots = {},
+  } = bindingScope;
+  const hostSnap = hostNodeId ? dataSnapshots[hostNodeId] : undefined;
   const effectiveRow: Record<string, unknown> | undefined =
     row || node?.rawRow || cell?.rawRow;
   const fallbackPrimaryValue =
@@ -463,6 +496,11 @@ export function interpolateBoundTriggerArgs(
     }
 
     let str = v;
+    if (hostSnap) {
+      str = str.replace(/\{\{\s*self(?:\.([a-zA-Z0-9_.-]+))?\s*\}\}/g, (_m, subPath) => {
+        return resolveSelfSnapshotPath(hostSnap, subPath);
+      });
+    }
     if (effectiveRow || node || cell) {
       str = str.replace(/\{\{\s*row\.([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, colKey) => {
         if (effectiveRow && effectiveRow[colKey] !== undefined && effectiveRow[colKey] !== null) {
@@ -550,6 +588,7 @@ export function interpolateActionCommand(params: {
   formValues?: Record<string, unknown>;
   contextValues?: Record<string, unknown>;
   dataSnapshots?: Record<string, DataSnapshot | undefined>;
+  focusScope?: BindingFocusScope;
   skillDefaultEnv?: Record<string, string>;
   secretKeys?: Set<string>;
   uiEnvOverride?: CommandEnvConfig;
@@ -566,6 +605,7 @@ export function interpolateActionCommand(params: {
     formValues = {},
     contextValues = {},
     dataSnapshots = {},
+    focusScope,
     skillDefaultEnv,
     secretKeys,
     uiEnvOverride,
@@ -795,6 +835,111 @@ export function interpolateActionCommand(params: {
       const resolved = resolveDataSnapshotPath(dataSnapshots, expr);
       return resolved !== "" ? escapeForTemplateOffset(str, offset, resolved) : "";
     });
+
+    const hostNodeId = focusScope?.hostNodeId || action.inlineHost?.nodeId;
+    const hostSnap = hostNodeId ? dataSnapshots[hostNodeId] : undefined;
+    if (hostSnap) {
+      out = out.replace(
+        /\{\{\s*self(?:\.([a-zA-Z0-9_.-]+))?\s*\}\}/g,
+        (_m, subPath, offset, str) => {
+          const val = resolveSelfSnapshotPath(hostSnap, subPath);
+          return val !== "" ? escapeForTemplateOffset(str, offset, val) : "";
+        }
+      );
+    }
+
+    if (focusScope) {
+      const effectiveRow =
+        focusScope.row || focusScope.node?.rawRow || focusScope.cell?.rawRow;
+      const fallbackPrimary =
+        focusScope.node?.value !== undefined && focusScope.node?.value !== null
+          ? String(focusScope.node.value)
+          : focusScope.cell?.rowKey !== undefined
+            ? String(focusScope.cell.rowKey)
+            : effectiveRow?.id !== undefined
+              ? String(effectiveRow.id)
+              : focusScope.node?.id !== undefined
+                ? String(focusScope.node.id)
+                : "";
+
+      if (effectiveRow || focusScope.node || focusScope.cell) {
+        out = out.replace(/\{\{\s*row\.([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, colKey, offset, str) => {
+          const raw =
+            effectiveRow && effectiveRow[colKey] !== undefined && effectiveRow[colKey] !== null
+              ? String(effectiveRow[colKey])
+              : fallbackPrimary;
+          return raw !== "" ? escapeForTemplateOffset(str, offset, raw) : "";
+        });
+      }
+
+      if (focusScope.selectedRows) {
+        out = out.replace(
+          /\{\{\s*selected\.([a-zA-Z0-9_.-]+)\s*\}\}/g,
+          (_m, colKey, offset, str) => {
+            const joined = (focusScope.selectedRows || [])
+              .map((r) => r[colKey])
+              .filter((val) => val !== undefined && val !== null)
+              .map(String)
+              .join(",");
+            return joined !== "" ? escapeForTemplateOffset(str, offset, joined) : "";
+          }
+        );
+      }
+
+      if (focusScope.cell || effectiveRow || focusScope.node) {
+        out = out.replace(
+          /\{\{\s*cell\.(rowKey|colKey|value)\s*\}\}/g,
+          (_m, key, offset, str) => {
+            const cRowKey =
+              focusScope.cell?.rowKey ??
+              (effectiveRow?.id != null ? String(effectiveRow.id) : fallbackPrimary);
+            const cColKey = focusScope.cell?.colKey ?? "";
+            const cVal =
+              focusScope.cell?.value !== undefined && focusScope.cell?.value !== null
+                ? String(focusScope.cell.value)
+                : fallbackPrimary;
+            const raw = key === "rowKey" ? cRowKey : key === "colKey" ? cColKey : cVal;
+            return raw !== "" ? escapeForTemplateOffset(str, offset, String(raw)) : "";
+          }
+        );
+      }
+
+      if (focusScope.node || effectiveRow || focusScope.cell) {
+        out = out.replace(
+          /\{\{\s*node\.(id|label|value|path|upstreamIds|downstreamIds)\s*\}\}/g,
+          (_m, key, offset, str) => {
+            const nId =
+              focusScope.node?.id ??
+              (effectiveRow?.id != null ? String(effectiveRow.id) : fallbackPrimary);
+            const nLabel =
+              focusScope.node?.label ??
+              (effectiveRow?.title != null
+                ? String(effectiveRow.title)
+                : effectiveRow?.name != null
+                  ? String(effectiveRow.name)
+                  : String(nId));
+            const nVal =
+              focusScope.node?.value !== undefined && focusScope.node?.value !== null
+                ? String(focusScope.node.value)
+                : fallbackPrimary;
+            const nPath = focusScope.node?.path ?? String(nId);
+            const raw =
+              key === "id"
+                ? nId
+                : key === "label"
+                  ? nLabel
+                  : key === "value"
+                    ? nVal
+                    : key === "path"
+                      ? nPath
+                      : key === "upstreamIds"
+                        ? (focusScope.node?.upstreamIds || []).join(",")
+                        : (focusScope.node?.downstreamIds || []).join(",");
+            return raw !== "" ? escapeForTemplateOffset(str, offset, String(raw)) : "";
+          }
+        );
+      }
+    }
 
     out = out.replace(/\{\{\s*form\.([a-zA-Z0-9_-]+)\s*\}\}/g, (_m, k, offset, str) => {
       if (isOffsetInsideDoubleQuotes(str, offset)) {
@@ -1552,5 +1697,378 @@ export function projectRecordsToGraph(
   }
 
   return computeGraphTopology(rawNodes, rawEdges);
+}
+
+export type ReactiveArchEdgeKind =
+  | "data_dag"
+  | "trigger"
+  | "multi_source_read"
+  | "feedback";
+
+export interface ReactiveArchNode extends GraphNodeItem {
+  symbolKind: "context" | "data" | "action";
+  rawId: string;
+  intermediate?: boolean;
+  isInline?: boolean;
+  definedIn?: string;
+}
+
+export interface ReactiveArchEdge extends GraphEdgeItem {
+  kind: ReactiveArchEdgeKind;
+  isFeedback?: boolean;
+}
+
+export function doesActionPatternMatch(pattern: string, actionId: string): boolean {
+  const pat = pattern.trim();
+  if (!pat) return false;
+  if (pat === "*") return true;
+  if (pat.endsWith("*")) return actionId.startsWith(pat.slice(0, -1));
+  return pat === actionId;
+}
+
+export function buildSkillReactiveArchitecture(
+  manifest: SkillManifest | PartialSkillManifest,
+  snapshots?: Record<string, DataSnapshot | undefined>,
+  provenance?: ManifestSymbolProvenance
+): {
+  nodes: ReactiveArchNode[];
+  edges: ReactiveArchEdge[];
+} {
+  const rawNodes: ReactiveArchNode[] = [];
+  const rawEdges: ReactiveArchEdge[] = [];
+  const edgeDedup = new Set<string>();
+
+  const pushEdge = (e: ReactiveArchEdge) => {
+    if (e.source === e.target) return;
+    const k = `${e.source}->${e.target}:${e.kind}:${e.label || ""}`;
+    if (edgeDedup.has(k)) return;
+    edgeDedup.add(k);
+    rawEdges.push(e);
+  };
+
+  const dataList = manifest.data || [];
+  const dataIds = new Set(dataList.map((d) => d.id));
+
+  // Determine which DataNodes are upstream sources for other DataNodes
+  const upstreamDataIds = new Set<string>();
+  for (const dn of dataList) {
+    for (const dep of dn.sync?.dependsOn || []) {
+      if (!dep.startsWith("context.")) upstreamDataIds.add(dep);
+    }
+    const texts = [
+      dn.command || "",
+      dn.script || "",
+      dn.code || "",
+      dn.sql || "",
+      dn.transform?.code || "",
+    ].join("\n");
+    for (const impId of extractImplicitDependencies(texts).dataNodeIds) {
+      if (impId !== dn.id) upstreamDataIds.add(impId);
+    }
+  }
+
+  // 1. Context Swimlane (layer 0)
+  for (const ctx of manifest.context || []) {
+    rawNodes.push({
+      id: `context:${ctx.key}`,
+      rawId: ctx.key,
+      symbolKind: "context",
+      label: ctx.label || ctx.key,
+      value: ctx.key,
+      group: "Context",
+      meta: `context.${ctx.key} (${ctx.type})`,
+      tone: "info",
+      layer: 0,
+      definedIn: provenance?.contextSource?.[ctx.key] || "manifest.yaml",
+    });
+    if (ctx.fromData && dataIds.has(ctx.fromData)) {
+      pushEdge({
+        source: `data:${ctx.fromData}`,
+        target: `context:${ctx.key}`,
+        label: "fromData",
+        kind: "feedback",
+        isFeedback: true,
+        tone: "info",
+      });
+    }
+  }
+
+  // 2. Data Swimlanes (layer 1 = Source/Intermediate Data, layer 2 = View Data)
+  for (const dn of dataList) {
+    const snap = snapshots?.[dn.id];
+    const prim = snap?.primitive || inferDataPrimitive(dn.shape || "raw", snap?.rawParsed);
+    const isInter = Boolean(dn.intermediate || dn.hidden);
+    const isSource = isInter || upstreamDataIds.has(dn.id) && !(dn.sync?.dependsOn?.length);
+    const layer = isSource ? 1 : 2;
+    rawNodes.push({
+      id: `data:${dn.id}`,
+      rawId: dn.id,
+      symbolKind: "data",
+      label: dn.title || dn.id,
+      value: dn.id,
+      group: isInter ? "Intermediate Data" : isSource ? "Source Data" : "View Data",
+      meta: `${prim} ➔ ${(dn.shape || "raw").toUpperCase()} (${dn.runtime || "zsh"})`,
+      tone: snap?.status === "error" ? "danger" : isInter ? "warn" : "success",
+      layer,
+      intermediate: isInter,
+      definedIn: provenance?.dataSource?.[dn.id] || "manifest.yaml",
+    });
+
+    const texts = [
+      dn.command || "",
+      dn.script || "",
+      dn.code || "",
+      dn.sql || "",
+      dn.db || "",
+      dn.filePath || "",
+      ...(Array.isArray(dn.pattern) ? dn.pattern : dn.pattern ? [dn.pattern] : []),
+      dn.transform?.code || "",
+    ].join("\n");
+    const imp = extractImplicitDependencies(texts);
+    for (const ck of imp.contextKeys) {
+      pushEdge({
+        source: `context:${ck}`,
+        target: `data:${dn.id}`,
+        label: "reads",
+        kind: "data_dag",
+        tone: "info",
+      });
+    }
+    for (const upId of imp.dataNodeIds) {
+      if (upId !== dn.id && dataIds.has(upId)) {
+        pushEdge({
+          source: `data:${upId}`,
+          target: `data:${dn.id}`,
+          label: "ctx.data",
+          kind: "data_dag",
+          tone: "info",
+        });
+      }
+    }
+    for (const dep of dn.sync?.dependsOn || []) {
+      if (dep.startsWith("context.")) {
+        const ck = dep.slice("context.".length);
+        pushEdge({
+          source: `context:${ck}`,
+          target: `data:${dn.id}`,
+          label: "dependsOn",
+          kind: "data_dag",
+          tone: "info",
+        });
+      } else if (dataIds.has(dep)) {
+        pushEdge({
+          source: `data:${dep}`,
+          target: `data:${dn.id}`,
+          label: "dependsOn",
+          kind: "data_dag",
+          tone: "info",
+        });
+      }
+    }
+
+    if (dn.selectContextKey) {
+      pushEdge({
+        source: `data:${dn.id}`,
+        target: `context:${dn.selectContextKey}`,
+        label: `selectContextKey`,
+        kind: "feedback",
+        isFeedback: true,
+        tone: "warn",
+      });
+    }
+  }
+
+  // 3. Actions Swimlane (layer 3)
+  const seenActions = new Map<string, ActionItem>();
+  for (const grp of manifest.actionGroups || []) {
+    for (const act of grp.actions || []) {
+      if (act?.id && !seenActions.has(act.id)) seenActions.set(act.id, act);
+    }
+    for (const sg of grp.subgroups || []) {
+      for (const act of sg.actions || []) {
+        if (act?.id && !seenActions.has(act.id)) seenActions.set(act.id, act);
+      }
+    }
+  }
+
+  for (const act of seenActions.values()) {
+    const isInline = Boolean(act.inlineHost || act.id.startsWith("inline:"));
+    const isInter = Boolean(act.intermediate || isInline);
+    rawNodes.push({
+      id: `action:${act.id}`,
+      rawId: act.id,
+      symbolKind: "action",
+      label: act.title || act.id,
+      value: act.id,
+      group: isInline ? "Inline Action" : isInter ? "Intermediate Action" : "Action",
+      meta: isInline
+        ? `⚡ Inline (${act.inlineHost?.slot || "bound"} on ${act.inlineHost?.nodeId || ""})`
+        : `${act.danger} · ${act.id}`,
+      tone: act.danger === "danger" ? "danger" : act.danger === "warn" ? "warn" : "neutral",
+      layer: 3,
+      intermediate: isInter,
+      isInline,
+      definedIn: provenance?.actionSource?.[act.id] || "manifest.yaml",
+    });
+
+    // Multi-source reads from command/script
+    const imp = extractImplicitDependencies(act.script || act.command || "");
+    for (const ck of imp.contextKeys) {
+      pushEdge({
+        source: `context:${ck}`,
+        target: `action:${act.id}`,
+        label: "{{context}}",
+        kind: "multi_source_read",
+        tone: "info",
+      });
+    }
+    for (const dnId of imp.dataNodeIds) {
+      if (dataIds.has(dnId)) {
+        pushEdge({
+          source: `data:${dnId}`,
+          target: `action:${act.id}`,
+          label: "{{data.*}}",
+          kind: "multi_source_read",
+          tone: "info",
+        });
+      }
+    }
+
+    // Multi-source reads from form.fromData
+    for (const f of act.form || []) {
+      if (f.fromData && dataIds.has(f.fromData)) {
+        pushEdge({
+          source: `data:${f.fromData}`,
+          target: `action:${act.id}`,
+          label: `fromData (${f.key})`,
+          kind: "multi_source_read",
+          tone: "info",
+        });
+      }
+    }
+
+    // Multi-source reads from preconditions
+    for (const pre of act.preconditions || []) {
+      if (pre.dataNodeId && dataIds.has(pre.dataNodeId)) {
+        pushEdge({
+          source: `data:${pre.dataNodeId}`,
+          target: `action:${act.id}`,
+          label: `precondition`,
+          kind: "multi_source_read",
+          tone: "warn",
+        });
+      }
+    }
+
+    // Feedback loops: output.intoData & output.refreshData
+    if (act.output?.intoData && dataIds.has(act.output.intoData)) {
+      pushEdge({
+        source: `action:${act.id}`,
+        target: `data:${act.output.intoData}`,
+        label: "intoData",
+        kind: "feedback",
+        isFeedback: true,
+        tone: "warn",
+      });
+    }
+    for (const refTarget of act.output?.refreshData || []) {
+      if (dataIds.has(refTarget)) {
+        pushEdge({
+          source: `action:${act.id}`,
+          target: `data:${refTarget}`,
+          label: "refreshData",
+          kind: "feedback",
+          isFeedback: true,
+          tone: "warn",
+        });
+      }
+    }
+  }
+
+  // 4. DataNode bound triggers & sync.refreshAfterActions
+  for (const dn of dataList) {
+    const slotPairs: Array<{ slot: string; tr: any }> = [
+      ...(dn.quickActions || []).map((tr) => ({ slot: "quickAction", tr })),
+      ...(dn.rowActions || []).map((tr) => ({ slot: "rowAction", tr })),
+      ...(dn.bulkActions || []).map((tr) => ({ slot: "bulkAction", tr })),
+      ...(dn.cellAction ? [{ slot: "cellAction", tr: dn.cellAction }] : []),
+      ...(dn.nodeActions || []).map((tr) => ({ slot: "nodeAction", tr })),
+    ];
+    for (const { slot, tr } of slotPairs) {
+      if (tr?.actionId && seenActions.has(tr.actionId)) {
+        pushEdge({
+          source: `data:${dn.id}`,
+          target: `action:${tr.actionId}`,
+          label: `${slot}: ${tr.label}`,
+          kind: "trigger",
+          tone: "success",
+        });
+        // Also scan trigger.args for cross-node {{data.<otherNode>.*}}
+        if (tr.args && typeof tr.args === "object") {
+          const argsText = Object.values(tr.args)
+            .filter((v) => typeof v === "string")
+            .join("\n");
+          const argImp = extractImplicitDependencies(argsText);
+          for (const extraDn of argImp.dataNodeIds) {
+            if (extraDn !== dn.id && dataIds.has(extraDn)) {
+              pushEdge({
+                source: `data:${extraDn}`,
+                target: `action:${tr.actionId}`,
+                label: "args {{data.*}}",
+                kind: "multi_source_read",
+                tone: "info",
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const refreshPatterns = [
+      ...(dn.sync?.refreshAfterActions || []),
+      ...(dn.sync?.invalidateOnActions || []),
+    ];
+    for (const pat of refreshPatterns) {
+      for (const act of seenActions.values()) {
+        if (doesActionPatternMatch(pat, act.id)) {
+          pushEdge({
+            source: `action:${act.id}`,
+            target: `data:${dn.id}`,
+            label: "refreshAfterActions",
+            kind: "feedback",
+            isFeedback: true,
+            tone: "warn",
+          });
+        }
+      }
+    }
+  }
+
+  const topo = computeGraphTopology(rawNodes, rawEdges);
+  const nodeMetaMap = new Map(rawNodes.map((n) => [n.id, n]));
+  const edgeMetaMap = new Map(
+    rawEdges.map((e) => [`${e.source}->${e.target}:${e.label || ""}`, e])
+  );
+
+  return {
+    nodes: topo.nodes.map((gn) => ({
+      ...gn,
+      ...(nodeMetaMap.get(gn.id) || {
+        symbolKind: "data",
+        rawId: gn.id,
+      }),
+      layer: nodeMetaMap.get(gn.id)?.layer ?? gn.layer,
+      upstreamIds: gn.upstreamIds,
+      downstreamIds: gn.downstreamIds,
+    })),
+    edges: topo.edges.map((ge) => {
+      const orig = edgeMetaMap.get(`${ge.source}->${ge.target}:${ge.label || ""}`);
+      return {
+        ...ge,
+        kind: orig?.kind || "data_dag",
+        isFeedback: orig?.isFeedback,
+      };
+    }),
+  };
 }
 

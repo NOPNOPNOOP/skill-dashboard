@@ -2,7 +2,11 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync,
 import { homedir } from "os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve } from "path";
 import YAML from "yaml";
-import { inferFormAndTemplateFromSynopsis, saveSkillManifestLayer } from "./cascade.ts";
+import {
+  findSkillAction,
+  inferFormAndTemplateFromSynopsis,
+  saveSkillManifestLayer,
+} from "./cascade.ts";
 import { DashboardDatabase } from "./db.ts";
 import { initManifestInDirectory } from "./manifest-cli.ts";
 import {
@@ -44,6 +48,7 @@ import {
 import { injectSkillDashboardBridge, ReactiveGraphEngine } from "./probes.ts";
 import type {
   AgentMountRoot,
+  BindingFocusScope,
   CanonicalSkill,
   CommandEnvConfig,
   DashboardServerOptions,
@@ -449,6 +454,36 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
                 const targetNode = docObj.data.find((n: any) => n && n.id === body.targetId);
                 if (targetNode) applyEnvFieldsToTarget(targetNode);
               } else if (body.targetKind === "action") {
+                const matchedAct = findSkillAction(skill.manifest, body.targetId);
+                if (matchedAct?.inlineHost && Array.isArray(docObj.data)) {
+                  const hostNode = docObj.data.find(
+                    (n: any) => n && n.id === matchedAct.inlineHost!.nodeId
+                  );
+                  if (hostNode) {
+                    const slotKey =
+                      matchedAct.inlineHost.slot === "quick"
+                        ? "quickActions"
+                        : matchedAct.inlineHost.slot === "row"
+                          ? "rowActions"
+                          : matchedAct.inlineHost.slot === "bulk"
+                            ? "bulkActions"
+                            : matchedAct.inlineHost.slot === "node"
+                              ? "nodeActions"
+                              : "cellAction";
+                    if (slotKey === "cellAction" && hostNode.cellAction) {
+                      applyEnvFieldsToTarget(hostNode.cellAction);
+                    } else if (Array.isArray(hostNode[slotKey])) {
+                      const tr = hostNode[slotKey].find(
+                        (t: any) =>
+                          t &&
+                          (t.id === body.targetId ||
+                            t.actionId === body.targetId ||
+                            t.label === matchedAct.inlineHost!.label)
+                      );
+                      if (tr) applyEnvFieldsToTarget(tr);
+                    }
+                  }
+                }
                 if (Array.isArray(docObj.actions)) {
                   for (const act of docObj.actions) {
                     if (act && act.id === body.targetId) applyEnvFieldsToTarget(act);
@@ -972,19 +1007,13 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             actionId?: string;
             adHocCommand?: string;
             formValues?: Record<string, unknown>;
+            focusScope?: BindingFocusScope;
           };
           const { skills } = getSkillsState();
           const skill = skills.find((s) => s.id === body.skillId);
           if (!skill) return jsonResponse({ error: `Skill not found: ${body.skillId}` }, 404);
 
-          let action = body.actionId
-            ? skill.manifest.actionGroups
-                .flatMap((g) => [
-                  ...(g.actions || []),
-                  ...(g.subgroups ? g.subgroups.flatMap((sg) => sg.actions) : []),
-                ])
-                .find((a) => a.id === body.actionId)
-            : undefined;
+          let action = findSkillAction(skill.manifest, body.actionId);
 
           if (!action && body.adHocCommand) {
             const inferred = inferFormAndTemplateFromSynopsis(body.adHocCommand);
@@ -1005,8 +1034,14 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
 
           const rawTmpl = action.script || action.command || "";
           const implicitDeps = extractImplicitDependencies(rawTmpl);
+          const neededDataIds = new Set<string>(implicitDeps.dataNodeIds);
+          if (body.focusScope?.hostNodeId) neededDataIds.add(body.focusScope.hostNodeId);
+          if (action.inlineHost?.nodeId) neededDataIds.add(action.inlineHost.nodeId);
+          for (const pre of action.preconditions || []) {
+            if (pre.dataNodeId) neededDataIds.add(pre.dataNodeId);
+          }
           const currentSnaps = reactiveEngine.getSkillSnapshots(skill.id);
-          for (const depId of implicitDeps.dataNodeIds) {
+          for (const depId of neededDataIds) {
             if (!currentSnaps[depId] && (skill.manifest.data || []).some((n) => n.id === depId)) {
               await reactiveEngine.evaluateNode({ skill, nodeId: depId, force: false });
             }
@@ -1034,6 +1069,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             formValues: body.formValues || {},
             contextValues: reactiveEngine.getContextState(skill),
             dataSnapshots: reactiveEngine.getSkillSnapshots(skill.id),
+            focusScope: body.focusScope,
             skillDefaultEnv,
             secretKeys,
             uiEnvOverride,
@@ -1134,6 +1170,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             interactiveShell?: boolean;
             keepShellOpen?: boolean;
             formValues?: Record<string, unknown>;
+            focusScope?: BindingFocusScope;
             runner?: "web_terminal" | "external_terminal";
             terminalApp?: "Terminal" | "iTerm";
             humanApproved?: boolean;
@@ -1169,14 +1206,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
             });
           }
 
-          let action = body.actionId
-            ? skill.manifest.actionGroups
-                .flatMap((g) => [
-                  ...(g.actions || []),
-                  ...(g.subgroups ? g.subgroups.flatMap((sg) => sg.actions) : []),
-                ])
-                .find((a) => a.id === body.actionId)
-            : undefined;
+          let action = findSkillAction(skill.manifest, body.actionId);
 
           if (!action && body.adHocCommand) {
             const inferred = inferFormAndTemplateFromSynopsis(body.adHocCommand);
@@ -1198,8 +1228,14 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
 
           const rawTmpl = action.script || action.command || "";
           const implicitDeps = extractImplicitDependencies(rawTmpl);
+          const neededDataIds = new Set<string>(implicitDeps.dataNodeIds);
+          if (body.focusScope?.hostNodeId) neededDataIds.add(body.focusScope.hostNodeId);
+          if (action.inlineHost?.nodeId) neededDataIds.add(action.inlineHost.nodeId);
+          for (const pre of action.preconditions || []) {
+            if (pre.dataNodeId) neededDataIds.add(pre.dataNodeId);
+          }
           const currentSnaps = reactiveEngine.getSkillSnapshots(skill.id);
-          for (const depId of implicitDeps.dataNodeIds) {
+          for (const depId of neededDataIds) {
             if (!currentSnaps[depId] && (skill.manifest.data || []).some((n) => n.id === depId)) {
               await reactiveEngine.evaluateNode({ skill, nodeId: depId, force: false });
             }
@@ -1233,6 +1269,7 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
               formValues: body.formValues || {},
               contextValues: ctxState,
               dataSnapshots: snapState,
+              focusScope: body.focusScope,
               skillDefaultEnv,
               secretKeys,
               uiEnvOverride,

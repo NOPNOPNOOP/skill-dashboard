@@ -4,6 +4,7 @@ data:
     title: "Service Daemon & SQLite Telemetry"
     description: "Live status of port 8766 server, macOS launchctl Keep-Alive agent, and SQLite run index (`runtime: ts` · `prelude: true` · `shape: kv` · `pollMs: 10000`)"
     category: "1. Service & Runtime"
+    subgroup: "1.1 Daemon & Storage"
     runtime: ts
     prelude: true
     shape: kv
@@ -59,6 +60,7 @@ data:
     title: "Architecture Specs & Reference Manuals (`shape: list`)"
     description: "High-density pill stream scanning `.scratch/skill-dashboard/issues/*.md` and `references/*.md` (`runtime: glob` · `shape: list` · View Switcher)"
     category: "1. Service & Runtime"
+    subgroup: "1.2 Specs & Audit"
     runtime: glob
     cwd: project_root
     pattern:
@@ -74,6 +76,7 @@ data:
     title: "Recent Execution Runs (SQLite `dashboard.db`)"
     description: "Zero-overhead native `bun:sqlite` query against `~/.local/share/skill-dashboard/dashboard.db` (`runtime: sqlite` · `shape: table`)"
     category: "1. Service & Runtime"
+    subgroup: "1.1 Daemon & Storage"
     runtime: sqlite
     db: "~/.local/share/skill-dashboard/dashboard.db"
     sql: "SELECT skill_id AS skill, action_title AS action, status, exit_code AS exitCode, duration_ms AS durationMs FROM runs ORDER BY started_at DESC LIMIT 8"
@@ -100,10 +103,15 @@ data:
     title: "3-Tier Manifest & Ecosystem Audit Output"
     description: "Live L1/L2/L3 validation output across all .dashboard/manifest.yaml files (`{{manifest_cli}} validate`)"
     category: "1. Service & Runtime"
+    subgroup: "1.2 Specs & Audit"
     runtime: zsh
     command: "{{manifest_cli}} validate"
     cwd: project_root
     shape: raw
+    sync:
+      onMount: true
+      refreshAfterActions:
+        - "validate-manifests"
 
 actionGroups:
   - name: "1. Studio Build, Validation & Daemon Service"

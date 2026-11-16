@@ -779,23 +779,52 @@ export class ReactiveGraphEngine {
   }): Promise<void> {
     const { skill, actionId, outputConfig, rawStdout } = params;
     const intoDataId = outputConfig?.intoData;
+    const refreshDataIds = outputConfig?.refreshData || [];
 
-    for (const node of skill.manifest.data || []) {
+    const allDataNodes = skill.manifest.data || [];
+    const matchedByRefreshAfterActions: string[] = [];
+
+    for (const node of allDataNodes) {
       if (intoDataId && node.id === intoDataId) continue;
-      const patterns = node.sync?.invalidateOnActions;
-      if (!patterns || patterns.length === 0) {
-        if (node.runtime !== "passive") {
-          this.invalidateNodeAndDownstream(skill, node.id);
-        }
-        continue;
-      }
+      const patterns = [
+        ...(node.sync?.refreshAfterActions || []),
+        ...(node.sync?.invalidateOnActions || []),
+      ];
+      if (!patterns || patterns.length === 0) continue;
       const matched = patterns.some((pat) => {
         if (pat === "*") return true;
         if (pat.endsWith("*")) return actionId.startsWith(pat.slice(0, -1));
         return pat === actionId;
       });
       if (matched) {
-        this.invalidateNodeAndDownstream(skill, node.id);
+        matchedByRefreshAfterActions.push(node.id);
+      }
+    }
+
+    const hasSelectiveTargetsForThisRun =
+      refreshDataIds.length > 0 || matchedByRefreshAfterActions.length > 0;
+
+    if (hasSelectiveTargetsForThisRun) {
+      for (const refId of refreshDataIds) {
+        if (refId !== intoDataId) {
+          this.invalidateNodeAndDownstream(skill, refId);
+        }
+      }
+      for (const matchedNodeId of matchedByRefreshAfterActions) {
+        this.invalidateNodeAndDownstream(skill, matchedNodeId);
+      }
+    } else {
+      for (const node of allDataNodes) {
+        if (intoDataId && node.id === intoDataId) continue;
+        const patterns = [
+          ...(node.sync?.refreshAfterActions || []),
+          ...(node.sync?.invalidateOnActions || []),
+        ];
+        if (!patterns || patterns.length === 0) {
+          if (node.runtime !== "passive") {
+            this.invalidateNodeAndDownstream(skill, node.id);
+          }
+        }
       }
     }
 
@@ -826,6 +855,7 @@ export class ReactiveGraphEngine {
           title: targetNode?.title || intoDataId,
           description: targetNode?.description,
           category: targetNode?.category,
+          subgroup: targetNode?.subgroup,
           intermediate: Boolean(targetNode?.intermediate || (targetNode as any)?.hidden),
           primitive: normalized.primitive,
           views: targetNode?.views,
@@ -987,6 +1017,7 @@ export class ReactiveGraphEngine {
         title: node.title,
         description: node.description,
         category: node.category,
+        subgroup: node.subgroup,
         intermediate: Boolean(node.intermediate || (node as any).hidden),
         rawParsed: undefined,
         consumedBy: this.getReverseConsumers(skill, node.id),
@@ -1077,6 +1108,7 @@ export class ReactiveGraphEngine {
           title: node.title,
           description: node.description,
           category: node.category,
+          subgroup: node.subgroup,
           intermediate: Boolean(node.intermediate || (node as any).hidden),
           primitive: normalized.primitive,
           views: node.views,
