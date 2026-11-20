@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -3439,6 +3440,203 @@ actionGroups:
             e.kind === "feedback"
         )
       ).toBe(true);
+    } finally {
+      srv.stop();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  test("21. Issue 22: Unified Whole-Block Markdown Shell Parsing, Multi-Line Normalization & Execution", async () => {
+    // A. Pure segment extraction seam: blockTitle, rawCode retention, and commands.length gating
+    const mdSample = [
+      "# Runbook",
+      "",
+      "```bash",
+      "# Deploy and inspect",
+      "cd sub",
+      "export APP_MODE=staging",
+      "python3 ~/.agents/skills/demo-ops/sync.py --check",
+      "bun --version",
+      "```",
+      "",
+      "```sh",
+      "cd sub",
+      "git status",
+      "```",
+      "",
+      "```bash",
+      "# Output only",
+      "OK: 42 items",
+      "```",
+    ].join("\n");
+
+    const segments = splitMarkdownIntoSegments(mdSample);
+    const codeSegs = segments.filter((s) => s.type === "code");
+    expect(codeSegs.length).toBe(3);
+
+    const first = codeSegs[0]!;
+    if (first.type === "code") {
+      expect(first.isExecutableShell).toBe(true);
+      expect(first.blockTitle).toBe("Deploy and inspect");
+      expect(first.rawCode).toContain("cd sub");
+      expect(first.rawCode).toContain("export APP_MODE=staging");
+      expect(first.commands.length).toBe(3);
+    }
+
+    const second = codeSegs[1]!;
+    if (second.type === "code") {
+      expect(second.isExecutableShell).toBe(true);
+      expect(second.blockTitle).toBe("cd sub");
+      expect(second.commands.length).toBe(1);
+    }
+
+    const third = codeSegs[2]!;
+    if (third.type === "code") {
+      expect(third.isExecutableShell).toBe(false);
+      expect(third.commands.length).toBe(0);
+    }
+
+    // B. Server HTTP seam: multi-line adHocCommand preview + execution without false form inference
+    const tmpBase = mkdtempSync(join(tmpdir(), "sd-issue22-"));
+    const agentsDir = join(tmpBase, ".agents", "skills");
+    const wsDir = join(tmpBase, "workspace");
+    const skillDir = join(agentsDir, "md-block-lab");
+    mkdirSync(join(skillDir, "tools"), { recursive: true });
+    mkdirSync(join(wsDir, ".venv", "bin"), { recursive: true });
+
+    const fakePython = join(wsDir, ".venv", "bin", "python");
+    writeFileSync(fakePython, "#!/bin/sh\nexec python3 \"$@\"\n");
+    chmodSync(fakePython, 0o755);
+
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: md-block-lab\ndescription: Issue 22 test skill\n---\n\n# Guide\n"
+    );
+    writeFileSync(
+      join(skillDir, "tools", "print_env.py"),
+      "import os, sys\nprint('PY_ENV=' + os.environ.get('MY_VAR', '') + ' ARGS=' + ' '.join(sys.argv[1:]))\n"
+    );
+
+    const srv = createDashboardServer({
+      port: 0,
+      agentRoots: [{ agent: "agents-hub", label: "Universal", path: agentsDir, scope: "global" }],
+      lockfiles: [],
+      dataDir: join(tmpBase, "data"),
+      configDir: join(tmpBase, "config"),
+      cacheDir: join(tmpBase, "cache"),
+      defaultWorkspace: wsDir,
+      homeDir: tmpBase,
+    });
+
+    try {
+      const guardedBlock = [
+        "# Example usage: run with <env> or [optional]",
+        "if [ -f .env ]; then",
+        '  echo "found env"',
+        "fi",
+        "cat <<EOF > /dev/null",
+        "python3 fake_in_heredoc.py --flag <ignored>",
+        "EOF",
+        'echo "hello" < /dev/null',
+        "python3 ~/.agents/skills/md-block-lab/tools/print_env.py --env {uat|prod}",
+      ].join("\n");
+
+      const prevRes = await fetch(`${srv.url}/api/preview-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skillId: "md-block-lab",
+          adHocCommand: guardedBlock,
+          formValues: { env: "prod" },
+        }),
+      });
+      expect(prevRes.status).toBe(200);
+      const prevJson = (await prevRes.json()) as any;
+      expect((prevJson.inferredForm || []).map((f: any) => f.key)).toEqual(["env"]);
+      expect(prevJson.maskedCommand).toContain("# Example usage: run with <env> or [optional]");
+      expect(prevJson.maskedCommand).toContain("python3 fake_in_heredoc.py --flag <ignored>");
+      expect(prevJson.maskedCommand).toContain(`${fakePython} `);
+      expect(prevJson.maskedCommand).toContain("--env prod");
+
+      // Execute full multi-line block with shared shell state across lines
+      const runBlock = [
+        "# Run full block",
+        "export MY_VAR=block_ok",
+        "python3 ~/.agents/skills/md-block-lab/tools/print_env.py --step one",
+        'echo "SECOND_STEP=$MY_VAR"',
+      ].join("\n");
+
+      const runRes = await fetch(`${srv.url}/api/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skillId: "md-block-lab",
+          adHocCommand: runBlock,
+          adHocTitle: "Run full block",
+          runner: "web_terminal",
+          humanApproved: true,
+        }),
+      });
+      expect(runRes.status).toBe(200);
+      const runJson = (await runRes.json()) as any;
+      const runId = runJson.runId as string;
+      expect(runId).toBeTruthy();
+
+      const wsUrl = srv.url.replace("http://", "ws://") + `/ws/runs/${runId}?offset=0`;
+      const runLogs: string[] = [];
+      let finalStatus = "";
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const ws = new WebSocket(wsUrl);
+        const timer = setTimeout(() => rejectPromise(new Error("Issue 22 run WS timeout")), 6000);
+        ws.onmessage = (ev) => {
+          const msg = JSON.parse(String(ev.data));
+          if (msg.type === "replay" || msg.type === "output") {
+            runLogs.push(msg.data);
+          } else if (msg.type === "status" && msg.status !== "running") {
+            finalStatus = msg.status;
+            clearTimeout(timer);
+            ws.close();
+            resolvePromise();
+          }
+        };
+      });
+
+      expect(finalStatus).toBe("completed");
+      const combinedRunLog = runLogs.join("");
+      expect(combinedRunLog).toContain("PY_ENV=block_ok ARGS=--step one");
+      expect(combinedRunLog).toContain("SECOND_STEP=block_ok");
+
+      // C. Verify action:adhoc-runbook command environment override + chained && python3 normalization on multi-line blocks
+      const altCwd = join(tmpBase, "alt-cwd");
+      mkdirSync(altCwd, { recursive: true });
+      const putEnvRes = await fetch(`${srv.url}/api/skills/md-block-lab/command-env`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetKind: "action",
+          targetId: "adhoc-runbook",
+          envConfig: {
+            cwd: altCwd,
+            env: { MY_VAR: "adhoc_env_ok" },
+          },
+        }),
+      });
+      expect(putEnvRes.status).toBe(200);
+
+      const chainedPrevRes = await fetch(`${srv.url}/api/preview-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skillId: "md-block-lab",
+          adHocCommand: "cd . && python3 ~/.agents/skills/md-block-lab/tools/print_env.py --chained\necho done",
+          formValues: {},
+        }),
+      });
+      expect(chainedPrevRes.status).toBe(200);
+      const chainedPrevJson = (await chainedPrevRes.json()) as any;
+      expect(realpathSync(chainedPrevJson.cwd)).toBe(realpathSync(altCwd));
+      expect(chainedPrevJson.resolvedEnv?.effectiveEnv?.MY_VAR).toBe("adhoc_env_ok");
+      expect(chainedPrevJson.maskedCommand).toContain(`cd . && ${fakePython} `);
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

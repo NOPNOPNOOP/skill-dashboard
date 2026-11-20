@@ -17,102 +17,99 @@ import {
   type SkillView,
 } from "./types.ts";
 
-export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
-  commandTemplate: string;
-  form: FormField[];
-  danger: "safe" | "warn" | "danger";
-  requiresHumanApprovalFlag?: string;
-  interactive: boolean;
-} {
-  let cmd = rawCmd.trim();
-  const form: FormField[] = [];
-  const usedKeys = new Set<string>();
+function extractSynopsesFromSingleActiveLine(
+  activeLine: string,
+  uniqueKey: (raw: string) => string,
+  form: FormField[]
+): { line: string; humanApprovalFlag?: string } {
+  let cmd = activeLine;
+  let humanApprovalFlag: string | undefined;
 
-  const uniqueKey = (raw: string) => {
-    const base = raw.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^_+|_+$/g, "") || "arg";
-    let candidate = base;
-    let idx = 2;
-    while (usedKeys.has(candidate)) {
-      candidate = `${base}_${idx++}`;
-    }
-    usedKeys.add(candidate);
-    return candidate;
-  };
-
-  let requiresHumanApprovalFlag: string | undefined;
   if (cmd.includes("--human-approved")) {
-    requiresHumanApprovalFlag = "--human-approved";
+    humanApprovalFlag = "--human-approved";
     cmd = cmd.replace(/\s*--human-approved\b/g, "");
   }
 
-  // Normalize python interpreter & skill directory references
+  // Normalize python interpreter & skill directory references (preserving leading indent or && / || / ; chaining)
   cmd = cmd.replace(
-    /^python3?\s+(?:~\/\.agents\/skills\/[^/\s]+\/|local\/)/,
-    "{{python}} {{skill_dir}}/"
+    /(^|\s*(?:&&|\|\||;)\s*)python3?\s+(?:~\/\.agents\/skills\/[^/\s]+\/|local\/)/g,
+    "$1{{python}} {{skill_dir}}/"
   );
-  cmd = cmd.replace(/^python3?\b/, "{{python}}");
+  cmd = cmd.replace(/(^|\s*(?:&&|\|\||;)\s*)python3?\b/g, "$1{{python}}");
   cmd = cmd.replace(/~\/\.agents\/skills\/[^/\s]+/g, "{{skill_dir}}");
 
   // Skip CLI synopsis placeholder extraction for inline script strings (e.g. python -c '...')
   if (/\s-c\s+['"]/.test(cmd)) {
-    return {
-      commandTemplate: cmd,
-      form: [],
-      danger: "safe",
-      requiresHumanApprovalFlag,
-      interactive: false,
-    };
+    return { line: cmd, humanApprovalFlag };
   }
 
   // 1. --flag {a|b|c} or [--flag {a|b|c}]
-  cmd = cmd.replace(/(\[\s*)?(--[a-zA-Z0-9_-]+)\s+\{([^}]+)\}(\s*\])?/g, (_match, optOpen, flag, choicesRaw) => {
-    const key = uniqueKey(flag.replace(/^--+/, ""));
-    const choices = choicesRaw.split("|").map((s: string) => s.trim()).filter(Boolean);
-    form.push({
-      key,
-      label: flag,
-      type: "select",
-      flag,
-      required: !optOpen,
-      default: choices[0],
-      options: choices.map((c: string) => ({ label: c, value: c })),
-    });
-    return `{{form.${key}}}`;
-  });
+  cmd = cmd.replace(
+    /(\[\s*)?(--[a-zA-Z0-9_-]+)\s+\{([^}]+)\}(\s*\])?/g,
+    (_match, optOpen, flag, choicesRaw) => {
+      const key = uniqueKey(flag.replace(/^--+/, ""));
+      const choices = choicesRaw
+        .split("|")
+        .map((s: string) => s.trim())
+        .filter(Boolean);
+      form.push({
+        key,
+        label: flag,
+        type: "select",
+        flag,
+        required: !optOpen,
+        default: choices[0],
+        options: choices.map((c: string) => ({ label: c, value: c })),
+      });
+      return `{{form.${key}}}`;
+    }
+  );
 
   // 2. [--flag <placeholder>] or --flag <placeholder> or [-o <placeholder>]
-  cmd = cmd.replace(/(\[\s*)?(-{1,2}[a-zA-Z0-9_-]+)\s+<([^>]+)>(\s*\])?/g, (_match, optOpen, flag, ph) => {
-    const key = uniqueKey(flag.replace(/^-+/, ""));
-    const isFile = /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh|txt|zip)/i.test(ph) || /file|path|snapshot/i.test(key);
-    const isDir = /dir|folder|workspace/i.test(key);
-    form.push({
-      key,
-      label: `${flag} (${ph})`,
-      type: isDir ? "directory" : isFile ? "file" : "text",
-      flag,
-      placeholder: ph,
-      required: !optOpen,
-    });
-    return `{{form.${key}}}`;
-  });
+  cmd = cmd.replace(
+    /(\[\s*)?(-{1,2}[a-zA-Z0-9_-]+)\s+<([^>\s][^>]*)>(\s*\])?/g,
+    (_match, optOpen, flag, ph) => {
+      const key = uniqueKey(flag.replace(/^-+/, ""));
+      const isFile =
+        /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh|txt|zip)/i.test(ph) ||
+        /file|path|snapshot/i.test(key);
+      const isDir = /dir|folder|workspace/i.test(key);
+      form.push({
+        key,
+        label: `${flag} (${ph})`,
+        type: isDir ? "directory" : isFile ? "file" : "text",
+        flag,
+        placeholder: ph,
+        required: !optOpen,
+      });
+      return `{{form.${key}}}`;
+    }
+  );
 
-  // 3. [--flag EXAMPLE_VAL] or [-o snapshot.json]
-  cmd = cmd.replace(/\[\s*(-{1,2}[a-zA-Z0-9_-]+)\s+([^\][\s]+)\s*\]/g, (_match, flag, exampleVal) => {
-    const key = uniqueKey(flag.replace(/^-+/, ""));
-    const cleanedVal = exampleVal.replace(/^["']|["']$/g, "");
-    const isNum = /^\d+$/.test(cleanedVal);
-    const isFile = /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh)/i.test(cleanedVal);
-    form.push({
-      key,
-      label: flag,
-      type: isNum ? "number" : isFile ? "file" : "text",
-      flag,
-      placeholder: cleanedVal,
-      default: isNum ? Number(cleanedVal) : undefined,
-      required: false,
-    });
-    return `{{form.${key}}}`;
-  });
+  // 3. [--flag EXAMPLE_VAL] or [-o snapshot.json] (skip shell `[ ... ]` test expressions & `[[ ... ]]`)
+  cmd = cmd.replace(
+    /\[\s*(-{1,2}[a-zA-Z0-9_-]+)\s+([^\][\s]+)\s*\]/g,
+    (fullMatch, flag, exampleVal, offset, fullStr) => {
+      const before = fullStr.slice(0, offset);
+      const after = fullStr.slice(offset + fullMatch.length);
+      if (before.endsWith("[") || after.startsWith("]")) return fullMatch;
+      if (/(?:^|\b(?:if|elif|while|until)|&&|\|\||;|!)\s*$/.test(before)) return fullMatch;
+      const key = uniqueKey(flag.replace(/^-+/, ""));
+      const cleanedVal = exampleVal.replace(/^["']|["']$/g, "");
+      const isNum = /^\d+$/.test(cleanedVal);
+      const isFile = /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh)/i.test(cleanedVal);
+      form.push({
+        key,
+        label: flag,
+        type: isNum ? "number" : isFile ? "file" : "text",
+        flag,
+        placeholder: cleanedVal,
+        default: isNum ? Number(cleanedVal) : undefined,
+        required: false,
+      });
+      return `{{form.${key}}}`;
+    }
+  );
 
   // 4. Optional boolean flags [--dry-run]
   cmd = cmd.replace(/\[\s*(--[a-zA-Z0-9_-]+)\s*\]/g, (_match, flag) => {
@@ -127,8 +124,8 @@ export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
     return `{{form.${key}}}`;
   });
 
-  // 5. [COMMAND] or [subcommand] or [target]
-  cmd = cmd.replace(/\[\s*([A-Za-z0-9_|-]+)\s*\]/g, (_match, token) => {
+  // 5. [COMMAND] or [subcommand] or [target] (preceded by start or whitespace so arr[idx] isn't matched)
+  cmd = cmd.replace(/(^|\s)\[\s*([A-Za-z0-9_|-]+)\s*\](?=\s|$)/g, (_match, leadWs, token) => {
     const key = uniqueKey(token.toLowerCase());
     if (token.includes("|")) {
       const opts = token.split("|").map((s: string) => s.trim());
@@ -150,33 +147,174 @@ export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
         required: false,
       });
     }
-    return `{{form.${key}}}`;
+    return `${leadWs}{{form.${key}}}`;
   });
 
-  // 6. Positional <arg>
-  cmd = cmd.replace(/<([^>]+)>/g, (_match, ph) => {
-    const key = uniqueKey(ph);
-    const isFile = /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh)/i.test(ph);
-    form.push({
-      key,
-      label: ph,
-      type: isFile ? "file" : "text",
-      positional: true,
-      placeholder: ph,
-      required: true,
-    });
-    return `{{form.${key}}}`;
-  });
+  // 6. Positional <arg> (skip shell <<heredoc, redirections with spaces/paths, and quotes)
+  cmd = cmd.replace(
+    /(^|[^<])<([A-Za-z_][A-Za-z0-9_.:|-]*(?:\s+[A-Za-z0-9_.:|-]+)*)>/g,
+    (fullMatch, lead, ph) => {
+      if (lead === "{" && ph.startsWith("{")) return fullMatch;
+      const key = uniqueKey(ph);
+      const isFile = /\.(xlsx|xls|pdf|json|csv|yaml|yml|md|py|sh)/i.test(ph);
+      form.push({
+        key,
+        label: ph,
+        type: isFile ? "file" : "text",
+        positional: true,
+        placeholder: ph,
+        required: true,
+      });
+      return `${lead}{{form.${key}}}`;
+    }
+  );
 
-  const unquotedForRisk = rawCmd
+  return { line: cmd, humanApprovalFlag };
+}
+
+function splitUnquotedTrailingComment(line: string): { code: string; comment: string } {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\\" && !inSingle) {
+      i++;
+      continue;
+    }
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble && (i === 0 || /\s/.test(line[i - 1]))) {
+      const code = line.slice(0, i).replace(/\s+$/, "");
+      const comment = line.slice(code.length);
+      return { code, comment };
+    }
+  }
+  return { code: line, comment: "" };
+}
+
+export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
+  commandTemplate: string;
+  form: FormField[];
+  danger: "safe" | "warn" | "danger";
+  requiresHumanApprovalFlag?: string;
+  interactive: boolean;
+} {
+  const form: FormField[] = [];
+  const usedKeys = new Set<string>();
+
+  const uniqueKey = (raw: string) => {
+    const base = raw.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^_+|_+$/g, "") || "arg";
+    let candidate = base;
+    let idx = 2;
+    while (usedKeys.has(candidate)) {
+      candidate = `${base}_${idx++}`;
+    }
+    usedKeys.add(candidate);
+    return candidate;
+  };
+
+  if (!rawCmd.includes("\n")) {
+    const { line, humanApprovalFlag } = extractSynopsesFromSingleActiveLine(
+      rawCmd.trim(),
+      uniqueKey,
+      form
+    );
+    const unquotedForRisk = rawCmd
+      .replace(/'\s*[\[{][\s\S]*?[\]}]\s*'/g, "''")
+      .replace(/"\s*[\[{][\s\S]*?[\]}]\s*"/g, '""');
+    const isDanger = /purge|clear-all|drop|delete|destroy|\bprod\b/i.test(unquotedForRisk);
+    const isWarn =
+      Boolean(humanApprovalFlag) ||
+      /sync|push|restore|clear|seed|bind|import/i.test(unquotedForRisk);
+    const interactive = /\btui\b|switch_roles\.py\s*$/i.test(rawCmd);
+
+    return {
+      commandTemplate: line.replace(/\s+/g, " ").trim(),
+      form,
+      danger: isDanger ? "danger" : isWarn ? "warn" : "safe",
+      requiresHumanApprovalFlag: humanApprovalFlag,
+      interactive,
+    };
+  }
+
+  // Multi-line shell block: process line-by-line while skipping comments, heredocs, and multi-line quotes
+  const lines = rawCmd.replace(/\r\n/g, "\n").split("\n");
+  const outLines: string[] = [];
+  const activeLinesForRisk: string[] = [];
+  let requiresHumanApprovalFlag: string | undefined;
+  let heredocDelim: string | null = null;
+  let inSingle = false;
+  let inDouble = false;
+
+  const advanceQuoteState = (line: string) => {
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === "\\" && !inSingle) {
+        i++;
+        continue;
+      }
+      if (ch === "'" && !inDouble) inSingle = !inSingle;
+      else if (ch === '"' && !inSingle) inDouble = !inDouble;
+      else if (ch === "#" && !inSingle && !inDouble && (i === 0 || /\s/.test(line[i - 1]))) {
+        break;
+      }
+    }
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+
+    if (heredocDelim !== null) {
+      outLines.push(rawLine);
+      if (trimmed === heredocDelim) {
+        heredocDelim = null;
+      }
+      continue;
+    }
+
+    if (inSingle || inDouble) {
+      outLines.push(rawLine);
+      advanceQuoteState(rawLine);
+      continue;
+    }
+
+    if (!trimmed || trimmed.startsWith("#")) {
+      outLines.push(rawLine);
+      continue;
+    }
+
+    const { code, comment } = splitUnquotedTrailingComment(rawLine);
+    const hdMatch = code.match(/(?:^|[^<])<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
+    const { line: normalizedCode, humanApprovalFlag } = extractSynopsesFromSingleActiveLine(
+      code,
+      uniqueKey,
+      form
+    );
+    if (humanApprovalFlag) {
+      requiresHumanApprovalFlag = humanApprovalFlag;
+    }
+
+    outLines.push(`${normalizedCode}${comment}`);
+    activeLinesForRisk.push(code);
+    advanceQuoteState(code);
+
+    if (!inSingle && !inDouble && hdMatch) {
+      heredocDelim = hdMatch[1];
+    }
+  }
+
+  const activeText = activeLinesForRisk.join("\n");
+  const unquotedForRisk = activeText
     .replace(/'\s*[\[{][\s\S]*?[\]}]\s*'/g, "''")
     .replace(/"\s*[\[{][\s\S]*?[\]}]\s*"/g, '""');
   const isDanger = /purge|clear-all|drop|delete|destroy|\bprod\b/i.test(unquotedForRisk);
-  const isWarn = Boolean(requiresHumanApprovalFlag) || /sync|push|restore|clear|seed|bind|import/i.test(unquotedForRisk);
-  const interactive = /\btui\b|switch_roles\.py\s*$/i.test(rawCmd);
+  const isWarn =
+    Boolean(requiresHumanApprovalFlag) ||
+    /sync|push|restore|clear|seed|bind|import/i.test(unquotedForRisk);
+  const interactive = /\btui\b|switch_roles\.py\s*$/i.test(activeText);
 
   return {
-    commandTemplate: rawCmd.includes("\n") ? cmd.trim() : cmd.replace(/\s+/g, " ").trim(),
+    commandTemplate: outLines.join("\n").trim(),
     form,
     danger: isDanger ? "danger" : isWarn ? "warn" : "safe",
     requiresHumanApprovalFlag,

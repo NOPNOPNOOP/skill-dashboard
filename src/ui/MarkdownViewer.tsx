@@ -28,7 +28,10 @@ import { highlightCodeToHtml, splitMarkdownIntoSegments } from "./highlight.ts";
 interface InlineExecutableCommandRowProps {
   skillId: string;
   rawCommand: string;
+  langLabel?: string;
   commentHint?: string;
+  isWholeBlock?: boolean;
+  modeSwitcher?: React.ReactNode;
   activeWorkspace: string;
   uiEnvOverride?: CommandEnvConfig;
   onSkillUpdated?: (skill: CanonicalSkill) => void;
@@ -45,7 +48,10 @@ interface InlineExecutableCommandRowProps {
 const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
   skillId,
   rawCommand,
+  langLabel = "bash",
   commentHint,
+  isWholeBlock = false,
+  modeSwitcher,
   activeWorkspace,
   uiEnvOverride,
   onSkillUpdated,
@@ -157,8 +163,8 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
       {/* Top Row: Comment Title + In-Place Execution Controls */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="px-1.5 py-0.5 rounded text-[11px] font-mono st-badge-accent shrink-0">
-            bash
+          <span className="px-1.5 py-0.5 rounded text-[11px] font-mono st-badge-accent shrink-0 uppercase">
+            {langLabel}
           </span>
           {commentHint && (
             <span className="text-xs font-semibold st-text-primary truncate">
@@ -184,6 +190,7 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
 
         {/* In-Place Execution Buttons */}
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+          {modeSwitcher}
           <button
             type="button"
             onClick={() => handleRun("web_terminal")}
@@ -232,12 +239,19 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
           <button
             type="button"
             onClick={() => {
-              navigator.clipboard.writeText(resolvedPreview);
+              const copyText = resolvedPreview.includes("\n")
+                ? `(\nset -e\n${resolvedPreview}\n)`
+                : resolvedPreview;
+              navigator.clipboard.writeText(copyText);
               setCopied(true);
               setTimeout(() => setCopied(false), 1500);
             }}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium st-btn-secondary"
-            title="Copy live workspace-resolved command"
+            title={
+              resolvedPreview.includes("\n")
+                ? "Copy subshell-wrapped live command"
+                : "Copy live workspace-resolved command"
+            }
           >
             {copied ? (
               <Check className="w-3.5 h-3.5 text-emerald-500" />
@@ -267,11 +281,11 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
         />
       )}
 
-      {/* Highlighted Original Synopsis */}
+      {/* Highlighted Original Synopsis / Script */}
       <pre
-        className="st-code-surface px-3 py-2 rounded-md text-[12.5px] font-mono overflow-x-auto leading-relaxed"
+        className="st-code-surface px-3 py-2.5 rounded-md text-[12.5px] font-mono overflow-x-auto leading-relaxed"
         dangerouslySetInnerHTML={{
-          __html: highlightCodeToHtml(rawCommand, "bash", false),
+          __html: highlightCodeToHtml(rawCommand, langLabel, isWholeBlock),
         }}
       />
 
@@ -348,15 +362,15 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
         </div>
       )}
 
-      {/* Live Workspace-Resolved Command Footer */}
+      {/* Live Workspace-Resolved Command Footer (Full Multi-Line Preview) */}
       {resolvedPreview !== rawCommand && (
-        <div className="flex items-center gap-2 text-[11.5px] font-mono st-text-muted px-1">
-          <span className="shrink-0 font-semibold text-sky-600 dark:text-sky-400">
-            Live Resolved:
+        <div className="flex flex-col gap-1 px-2.5 py-2 rounded-md bg-sky-500/5 border border-sky-500/20">
+          <span className="text-[11px] font-semibold text-sky-600 dark:text-sky-400 font-mono">
+            Live Resolved ({resolvedPreview.includes("\n") ? "Full Script" : "Command"}):
           </span>
-          <code className="truncate select-all st-text-secondary" title={resolvedPreview}>
-            $ {resolvedPreview}
-          </code>
+          <pre className="text-[11.5px] font-mono st-text-secondary overflow-x-auto whitespace-pre leading-relaxed select-all">
+            {resolvedPreview}
+          </pre>
         </div>
       )}
 
@@ -401,15 +415,30 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
 }) => {
   const [summaryCollapsed, setSummaryCollapsed] = useState(true);
   const [copiedBlockIdx, setCopiedBlockIdx] = useState<number | null>(null);
+  const [blockModes, setBlockModes] = useState<Record<number, "block" | "split">>({});
+
+  useEffect(() => {
+    setBlockModes({});
+  }, [markdown, currentSource]);
 
   const segments = useMemo(() => splitMarkdownIntoSegments(markdown), [markdown]);
 
   const allRunnableCommands = useMemo(
     () =>
-      segments.flatMap((seg) =>
-        seg.type === "code" && seg.isExecutableShell ? seg.commands : []
-      ),
-    [segments]
+      segments.flatMap((seg, idx) => {
+        if (seg.type !== "code" || !seg.isExecutableShell) return [];
+        const mode = seg.commands.length > 1 ? blockModes[idx] || "block" : "block";
+        if (mode === "split") {
+          return seg.commands;
+        }
+        return [
+          {
+            comment: seg.blockTitle,
+            command: seg.rawCode,
+          },
+        ];
+      }),
+    [segments, blockModes]
   );
 
   const handleProseClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -512,14 +541,65 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
             );
           }
 
-          // Code block segment: if it's an executable shell block, render In-Place Executable Widget!
+          // Code block segment: executable shell defaults to unified Whole-Block card, with per-block [整块 | 逐条 (N)] toggle when N > 1
           if (seg.isExecutableShell) {
+            const hasMultiple = seg.commands.length > 1;
+            const activeMode = hasMultiple ? blockModes[idx] || "block" : "block";
+            const modeTogglePill = hasMultiple ? (
+              <div
+                className="inline-flex items-center rounded-md border st-border overflow-hidden text-[11px] font-medium shrink-0"
+                title="Switch code block mode: run as one unified script or split into individual commands"
+              >
+                <button
+                  type="button"
+                  onClick={() => setBlockModes((prev) => ({ ...prev, [idx]: "block" }))}
+                  className={`px-2 py-0.5 transition-colors ${
+                    activeMode === "block"
+                      ? "bg-sky-600 text-white font-semibold"
+                      : "st-surface-muted st-text-secondary hover:st-text-primary"
+                  }`}
+                >
+                  Block
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBlockModes((prev) => ({ ...prev, [idx]: "split" }))}
+                  className={`px-2 py-0.5 border-l st-border transition-colors ${
+                    activeMode === "split"
+                      ? "bg-sky-600 text-white font-semibold"
+                      : "st-surface-muted st-text-secondary hover:st-text-primary"
+                  }`}
+                >
+                  Split ({seg.commands.length})
+                </button>
+              </div>
+            ) : null;
+
+            if (activeMode === "block") {
+              return (
+                <div key={idx} className="my-2 rounded-xl border st-border overflow-hidden">
+                  <InlineExecutableCommandRow
+                    skillId={skillId}
+                    rawCommand={seg.rawCode}
+                    langLabel={seg.lang}
+                    commentHint={seg.blockTitle}
+                    isWholeBlock={true}
+                    modeSwitcher={modeTogglePill}
+                    activeWorkspace={activeWorkspace}
+                    uiEnvOverride={commandEnvOverrides?.["action:adhoc-runbook"]}
+                    onSkillUpdated={onSkillUpdated}
+                    onExecuteAdHoc={(p) => onExecuteAdHoc(p)}
+                  />
+                </div>
+              );
+            }
+
             return (
               <div
                 key={idx}
                 className="my-2 rounded-xl border st-border overflow-hidden st-surface-muted p-3 flex flex-col gap-2.5"
               >
-                <div className="flex items-center justify-between px-1">
+                <div className="flex items-center justify-between gap-2 px-1 flex-wrap">
                   <span className="text-xs font-semibold st-text-secondary flex items-center gap-1.5">
                     <Terminal className="w-3.5 h-3.5 text-sky-500" />
                     <span>
@@ -527,22 +607,28 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
                       {seg.commands.length === 1 ? "command" : "commands"})
                     </span>
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(seg.rawCode);
-                      setCopiedBlockIdx(idx);
-                      setTimeout(() => setCopiedBlockIdx(null), 1500);
-                    }}
-                    className="inline-flex items-center gap-1 text-xs st-text-muted hover:st-text-primary"
-                  >
-                    {copiedBlockIdx === idx ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-500" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span>Copy Full Block</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {modeTogglePill}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const copyText = seg.rawCode.includes("\n")
+                          ? `(\nset -e\n${seg.rawCode}\n)`
+                          : seg.rawCode;
+                        navigator.clipboard.writeText(copyText);
+                        setCopiedBlockIdx(idx);
+                        setTimeout(() => setCopiedBlockIdx(null), 1500);
+                      }}
+                      className="inline-flex items-center gap-1 text-xs st-text-muted hover:st-text-primary"
+                    >
+                      {copiedBlockIdx === idx ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-500" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                      <span>Copy Full Block</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex flex-col gap-2">
@@ -551,6 +637,7 @@ export const MarkdownContentRenderer: React.FC<MarkdownContentRendererProps> = (
                       key={cIdx}
                       skillId={skillId}
                       rawCommand={cmdItem.command}
+                      langLabel={seg.lang}
                       commentHint={cmdItem.comment}
                       activeWorkspace={activeWorkspace}
                       uiEnvOverride={commandEnvOverrides?.["action:adhoc-runbook"]}

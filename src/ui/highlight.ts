@@ -66,11 +66,37 @@ export type MarkdownSegment =
       lang: string;
       rawCode: string;
       isExecutableShell: boolean;
+      blockTitle?: string;
       commands: Array<{ comment?: string; command: string }>;
     };
 
 const EXECUTABLE_PREFIX_REGEX =
   /^(?:python3?|uv|bun|npx|npm|pnpm|yarn|node|sh|bash|zsh|git|curl|docker|kubectl|alembic|pytest|ruff|mypy|make|cargo|go|open|ln|mkdir|cp|mv|rm|cat|ls|find|grep|export|env|~\/|\.\/|\/|\{\{python\}\}|\{\{skill_dir\}\})\b/;
+
+export function deriveShellBlockTitle(rawCode: string): string {
+  const lines = rawCode.replace(/\r\n/g, "\n").split("\n");
+  let leadingComment = "";
+  let firstCodeLine = "";
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#!")) continue;
+    if (trimmed.startsWith("#")) {
+      const cleaned = trimmed.replace(/^#+\s*/, "").trim();
+      // Skip pure divider comments like "# ---" or "# ==="
+      if (cleaned && !/^[-=_*#]+$/.test(cleaned) && !leadingComment) {
+        leadingComment = cleaned;
+      }
+      continue;
+    }
+    firstCodeLine = trimmed;
+    break;
+  }
+
+  const chosen = leadingComment || firstCodeLine || "Shell Script";
+  return chosen.length > 72 ? `${chosen.slice(0, 69)}...` : chosen;
+}
 
 export function extractExecutableCommandsFromShellBlock(
   rawCode: string
@@ -170,12 +196,14 @@ export function splitMarkdownIntoSegments(md: string): MarkdownSegment[] {
     const rawCode = (match[2] || "").replace(/\s+$/, "");
     const isShell = ["bash", "sh", "zsh", "shell", "console"].includes(lang);
     const commands = isShell ? extractExecutableCommandsFromShellBlock(rawCode) : [];
+    const isExecutableShell = isShell && commands.length > 0;
 
     segments.push({
       type: "code",
       lang: lang || "text",
       rawCode,
-      isExecutableShell: isShell && commands.length > 0,
+      isExecutableShell,
+      blockTitle: isExecutableShell ? deriveShellBlockTitle(rawCode) : undefined,
       commands,
     });
 
