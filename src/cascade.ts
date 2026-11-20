@@ -213,12 +213,28 @@ export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
     return candidate;
   };
 
+  const finalizeDuplicateLabels = (fields: FormField[]) => {
+    const counts = new Map<string, number>();
+    for (const f of fields) {
+      counts.set(f.label, (counts.get(f.label) || 0) + 1);
+    }
+    const seen = new Map<string, number>();
+    for (const f of fields) {
+      if ((counts.get(f.label) || 0) > 1) {
+        const idx = (seen.get(f.label) || 0) + 1;
+        seen.set(f.label, idx);
+        f.label = `${f.label} #${idx}`;
+      }
+    }
+  };
+
   if (!rawCmd.includes("\n")) {
     const { line, humanApprovalFlag } = extractSynopsesFromSingleActiveLine(
       rawCmd.trim(),
       uniqueKey,
       form
     );
+    finalizeDuplicateLabels(form);
     const unquotedForRisk = rawCmd
       .replace(/'\s*[\[{][\s\S]*?[\]}]\s*'/g, "''")
       .replace(/"\s*[\[{][\s\S]*?[\]}]\s*"/g, '""');
@@ -312,6 +328,8 @@ export function inferFormAndTemplateFromSynopsis(rawCmd: string): {
     Boolean(requiresHumanApprovalFlag) ||
     /sync|push|restore|clear|seed|bind|import/i.test(unquotedForRisk);
   const interactive = /\btui\b|switch_roles\.py\s*$/i.test(activeText);
+
+  finalizeDuplicateLabels(form);
 
   return {
     commandTemplate: outLines.join("\n").trim(),

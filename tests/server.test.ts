@@ -3637,6 +3637,41 @@ actionGroups:
       expect(realpathSync(chainedPrevJson.cwd)).toBe(realpathSync(altCwd));
       expect(chainedPrevJson.resolvedEnv?.effectiveEnv?.MY_VAR).toBe("adhoc_env_ok");
       expect(chainedPrevJson.maskedCommand).toContain(`cd . && ${fakePython} `);
+
+      // D. Verify empty required placeholders preserve <placeholder> in preview and disambiguate duplicate labels (#1, #2)
+      const dupPhCmd =
+        'git fetch origin --prune\ngit checkout <branch-name> && git reset --hard "origin/<branch-name>"';
+      const emptyPhRes = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "md-block-lab",
+            adHocCommand: dupPhCmd,
+            formValues: {},
+          }),
+        })
+      ).json()) as any;
+      expect((emptyPhRes.inferredForm || []).map((f: any) => f.label)).toEqual([
+        "branch-name #1",
+        "branch-name #2",
+      ]);
+      expect(emptyPhRes.maskedCommand).toBe(dupPhCmd);
+
+      const partialPhRes = (await (
+        await fetch(`${srv.url}/api/preview-command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skillId: "md-block-lab",
+            adHocCommand: dupPhCmd,
+            formValues: { branch_name: "feat/demo" },
+          }),
+        })
+      ).json()) as any;
+      expect(partialPhRes.maskedCommand).toBe(
+        'git fetch origin --prune\ngit checkout feat/demo && git reset --hard "origin/<branch-name>"'
+      );
     } finally {
       srv.stop();
       rmSync(tmpBase, { recursive: true, force: true });

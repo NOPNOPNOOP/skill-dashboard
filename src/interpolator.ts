@@ -699,6 +699,15 @@ export function interpolateActionCommand(params: {
     }
 
     if (rawVal === undefined || rawVal === null || rawVal === "") {
+      if (previewOnly && action.id === "adhoc-runbook" && field.required && field.placeholder) {
+        const phLiteral = `<${field.placeholder}>`;
+        rawFieldValues[field.key] = phLiteral;
+        const previewToken =
+          field.flag && !field.positional ? `${field.flag} ${phLiteral}` : phLiteral;
+        realTokens[field.key] = previewToken;
+        maskedTokens[field.key] = previewToken;
+        continue;
+      }
       realTokens[field.key] = "";
       maskedTokens[field.key] = "";
       continue;
@@ -949,6 +958,10 @@ export function interpolateActionCommand(params: {
             : formValues[k] !== undefined && formValues[k] !== null
               ? String(formValues[k])
               : "";
+        // Keep ad-hoc <placeholder> unescaped inside double quotes during preview
+        if (previewOnly && action.id === "adhoc-runbook" && /^<[^>]+>$/.test(unquoted)) {
+          return unquoted;
+        }
         return escapeForTemplateOffset(str, offset, unquoted);
       }
       if (tokenMap[k] !== undefined) return tokenMap[k];

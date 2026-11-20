@@ -64,8 +64,22 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
   const [resolvedEnv, setResolvedEnv] = useState<ResolvedCommandEnvSummary | null>(null);
   const [envPanelOpen, setEnvPanelOpen] = useState<boolean>(false);
   const [paramsExpanded, setParamsExpanded] = useState<boolean>(false);
+  const [codeView, setCodeView] = useState<"source" | "resolved">("source");
   const [copied, setCopied] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCodeView("source");
+  }, [rawCommand]);
+
+  const hasResolvedDiff = resolvedPreview !== rawCommand;
+  const effectiveCodeView = hasResolvedDiff ? codeView : "source";
+  const displayedCode = effectiveCodeView === "resolved" ? resolvedPreview : rawCommand;
+
+  const updateFormValue = (key: string, value: unknown) => {
+    setFormValues((prev) => ({ ...prev, [key]: value }));
+    setCodeView("resolved");
+  };
 
   // Initial fetch to infer form fields and initial preview
   useEffect(() => {
@@ -281,13 +295,49 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
         />
       )}
 
-      {/* Highlighted Original Synopsis / Script */}
-      <pre
-        className="st-code-surface px-3 py-2.5 rounded-md text-[12.5px] font-mono overflow-x-auto leading-relaxed"
-        dangerouslySetInnerHTML={{
-          __html: highlightCodeToHtml(rawCommand, langLabel, isWholeBlock),
-        }}
-      />
+      {/* Single Unified Code Area with Source / Resolved View Toggle */}
+      <div className="rounded-md border st-border overflow-hidden">
+        {hasResolvedDiff && (
+          <div className="px-2.5 py-1 st-surface-muted border-b st-border flex items-center justify-between gap-2 text-[11px]">
+            <span className="font-mono st-text-muted truncate">
+              {effectiveCodeView === "resolved"
+                ? `Live Resolved · cwd: ${previewCwd}`
+                : "Original Block Source (live resolution ready)"}
+            </span>
+            <div className="inline-flex items-center rounded border st-border overflow-hidden font-medium shrink-0">
+              <button
+                type="button"
+                onClick={() => setCodeView("source")}
+                className={`px-2 py-0.5 transition-colors ${
+                  effectiveCodeView === "source"
+                    ? "bg-sky-600 text-white font-semibold"
+                    : "st-text-secondary hover:st-text-primary"
+                }`}
+              >
+                Source
+              </button>
+              <button
+                type="button"
+                onClick={() => setCodeView("resolved")}
+                className={`px-2 py-0.5 border-l st-border transition-colors flex items-center gap-1 ${
+                  effectiveCodeView === "resolved"
+                    ? "bg-sky-600 text-white font-semibold"
+                    : "text-sky-600 dark:text-sky-400 hover:st-text-primary"
+                }`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-current opacity-80" />
+                <span>Resolved</span>
+              </button>
+            </div>
+          </div>
+        )}
+        <pre
+          className="st-code-surface px-3 py-2.5 text-[12.5px] font-mono overflow-x-auto leading-relaxed"
+          dangerouslySetInnerHTML={{
+            __html: highlightCodeToHtml(displayedCode, langLabel, isWholeBlock),
+          }}
+        />
+      </div>
 
       {/* Inline Parameter Inputs (when command has <arg>, {a|b}, [--flag]) */}
       {inferredForm.length > 0 && paramsExpanded && (
@@ -303,9 +353,7 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
                   <input
                     type="checkbox"
                     checked={Boolean(val)}
-                    onChange={(e) =>
-                      setFormValues((prev) => ({ ...prev, [field.key]: e.target.checked }))
-                    }
+                    onChange={(e) => updateFormValue(field.key, e.target.checked)}
                     className="w-3.5 h-3.5 accent-sky-600"
                   />
                   <span className="font-medium st-text-primary">{field.label}</span>
@@ -321,9 +369,7 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
                   </span>
                   <select
                     value={String(val ?? "")}
-                    onChange={(e) =>
-                      setFormValues((prev) => ({ ...prev, [field.key]: e.target.value }))
-                    }
+                    onChange={(e) => updateFormValue(field.key, e.target.value)}
                     className="flex-1 px-2 py-1 rounded-md st-input text-xs font-mono"
                   >
                     {(field.options || []).map((o) => (
@@ -346,31 +392,18 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
                   value={String(val ?? "")}
                   placeholder={field.placeholder || field.key}
                   onChange={(e) =>
-                    setFormValues((prev) => ({
-                      ...prev,
-                      [field.key]:
-                        field.type === "number" && e.target.value !== ""
-                          ? Number(e.target.value)
-                          : e.target.value,
-                    }))
+                    updateFormValue(
+                      field.key,
+                      field.type === "number" && e.target.value !== ""
+                        ? Number(e.target.value)
+                        : e.target.value
+                    )
                   }
                   className="flex-1 px-2 py-1 rounded-md st-input text-xs font-mono min-w-0"
                 />
               </div>
             );
           })}
-        </div>
-      )}
-
-      {/* Live Workspace-Resolved Command Footer (Full Multi-Line Preview) */}
-      {resolvedPreview !== rawCommand && (
-        <div className="flex flex-col gap-1 px-2.5 py-2 rounded-md bg-sky-500/5 border border-sky-500/20">
-          <span className="text-[11px] font-semibold text-sky-600 dark:text-sky-400 font-mono">
-            Live Resolved ({resolvedPreview.includes("\n") ? "Full Script" : "Command"}):
-          </span>
-          <pre className="text-[11.5px] font-mono st-text-secondary overflow-x-auto whitespace-pre leading-relaxed select-all">
-            {resolvedPreview}
-          </pre>
         </div>
       )}
 
