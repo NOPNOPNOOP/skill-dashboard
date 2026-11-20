@@ -180,7 +180,7 @@ const InlineExecutableCommandRow: React.FC<InlineExecutableCommandRowProps> = ({
           <span className="px-1.5 py-0.5 rounded text-[11px] font-mono st-badge-accent shrink-0 uppercase">
             {langLabel}
           </span>
-          {commentHint && (
+          {!isWholeBlock && commentHint && (
             <span className="text-xs font-semibold st-text-primary truncate">
               {commentHint}
             </span>
